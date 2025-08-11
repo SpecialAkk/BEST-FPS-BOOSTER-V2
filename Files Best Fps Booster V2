@@ -1,0 +1,691 @@
+local O, G, S, V, P, U = {}, game, nil, Vector3.new, CFrame.new, nil;
+
+local srv = {
+    "Unknown",
+    "RunService",
+    "CollectionService",
+    "Workspace",
+    "Stats",
+    "LocalPlayer",
+    "Players",
+    "HttpService",
+    "PhysicsService"
+};
+
+local s1, s2, s3, s4, s5, s6 = G:GetService(srv[2]), G:GetService(srv[3]), G:GetService(srv[4]), G:GetService(srv[5]), G:GetService(srv[7]), G:GetService(srv[9]);
+local lP, cam = s5.LocalPlayer, s3.CurrentCamera;
+local ip, pc, sp, wt, cr, rs = ipairs, pcall, task.spawn, task.wait, coroutine.create, coroutine.resume;
+local mf, mh, me, mm, mx, mc, ms, ma = math.floor, math.huge, math.exp, math.min, math.max, math.clamp, math.sqrt, math.abs;
+
+O.Config = {
+    VisualSqr = 250000,
+    BigSqr = 250000 * 2.25,
+    PhysicsSqr = 350000,
+    AnimSqr = 450000,
+    TextureSqr = 300000,
+    ParticleSqr = 200000,
+    SoundSqr = 150000,
+    EffectSqr = 180000,
+    ScriptSqr = 400000,
+    ShadowSqr = 250000,
+    Hysterisis = 1,
+    GridSize = 1500,
+    UpdateFrequency = 0.3,
+    MaxObjectsPerUpdate = 1000,
+    DebugMode = false,
+    ParticleScaleMin = 0.2,
+    OcclusionRays = 2,
+    QualityLevel = "High",
+    EnableOcclusionCull = true,
+    EnableEventDriven = true,
+    CameraMoveThreshold = 50,
+    EnableMeshConvert = true,
+    MeshSimplifyLevel = 2
+};
+
+local qualityMultipliers = {Low = 0.5, Medium = 0.75, High = 1}
+local qm = qualityMultipliers[O.Config.QualityLevel] or 1
+for k, v in pairs(O.Config) do
+    if string.find(k, "Sqr") then O.Config[k] = v * qm end
+end
+
+O = {_r = false};
+O.U = {};
+
+function O.U.v(o)
+    return o and o.Parent and o:IsDescendantOf(G)
+end
+
+function O.U.iv(p)
+    if not p then return false end
+    local size = p.Size / 2
+    local cframe = p.CFrame
+    local corners = {
+        cframe * V(size.X, size.Y, size.Z),
+        cframe * V(size.X, size.Y, -size.Z),
+        cframe * V(size.X, -size.Y, size.Z),
+        cframe * V(size.X, -size.Y, -size.Z),
+        cframe * V(-size.X, size.Y, size.Z),
+        cframe * V(-size.X, size.Y, -size.Z),
+        cframe * V(-size.X, -size.Y, size.Z),
+        cframe * V(-size.X, -size.Y, -size.Z),
+    }
+    local vSize = cam.ViewportSize
+    for i = 1, #corners do
+        local vp, onScreen = cam:WorldToViewportPoint(corners[i])
+        if onScreen and vp.Z > 0 and vp.X > 0 and vp.X < vSize.X and vp.Y > 0 and vp.Y < vSize.Y then
+            return true
+        end
+    end
+    return false
+end
+
+O.M1 = {
+    P = {
+        [1] = {f = 70, p = 50},
+        [2] = {f = 45, p = 40},
+        [3] = {f = 35, p = 30},
+        [4] = {f = 25, p = 20}
+    },
+    a = {r = 1, p = 1, e = 1, d = 1, c = 1, v = 1, ef = 1},
+    af = 60,
+    i = 0,
+    s = "Normal",
+    cs = 0,
+    BD = 5,
+    RF = 50,
+    EF = 38
+};
+
+function O.M1:u(dt)
+    local cf = 1 / dt
+    self.i = self.i * 0.95 + ma(cf - self.af) * 0.05
+    self.af = self.af * 0.97 + cf * 0.03
+    local s, af = self.s, self.af
+    if s == "Normal" then
+        if af < self.EF and self.i > 12 then
+            self.s = "Emergency"
+        end
+    elseif s == "Emergency" then
+        if af > self.RF and self.i < 8 then
+            self.s = "Cooldown"
+            self.cs = os.clock()
+        end
+    elseif s == "Cooldown" then
+        if af < self.EF and self.i > 12 then
+            self.s = "Emergency"
+        elseif os.clock() - self.cs > self.BD then
+            self.s = "Normal"
+        end
+    end
+    local p = self.P[4]
+    if af > self.P[1].f then
+        p = self.P[1]
+    elseif af > self.P[2].f then
+        p = self.P[2]
+    elseif af > self.P[3].f then
+        p = self.P[3]
+    end
+    local pf = s3:GetRealPhysicsFPS() or 60
+    local rs, ps = af / p.f, pf / p.p
+    local iF = 1 + mc(self.i / 20, 0, 1)
+    local a = 0.15 + 0.2 * (self.s == "Emergency" and 1 or 0)
+    local function ct(v)
+        if v < 0.75 then return 4
+        elseif v < 0.9 then return 3
+        else return 1 end
+    end
+    local nr, np = ct(rs), ct(ps)
+    local ag = self.a
+    ag.r = ag.r + (nr * iF - ag.r) * a
+    ag.p = ag.p + (np * iF - ag.p) * a
+    ag.e = ag.e + (nr * iF - ag.e) * a
+    ag.d = ag.d + (nr * iF - ag.d) * a
+    ag.c = ag.c + (nr - ag.c) * a
+    ag.v = ag.v + (nr * iF - ag.v) * a
+    ag.ef = ag.ef + (nr * iF - ag.ef) * a
+    
+    if O.Config.DebugMode and os.clock() % 10 < dt then
+        print("Current FPS:", math.round(af), "Mode:", s)
+    end
+end
+
+O.M4 = {t = {}, ti = 1, b = 0.005, phase = 0, lastCamPos = cam.CFrame.Position, lastTriggerTime = 0};
+
+function O.M4:a(t)
+    table.insert(self.t, t)
+end
+
+function O.M4:s()
+    if not O.Config.EnableEventDriven then
+        sp(function()
+            while true do
+                local st = os.clock()
+                local i = 0
+                while os.clock() - st < self.b and i < #self.t do
+                    local task = self.t[self.ti]
+                    if task then
+                        if i % 2 == self.phase % 2 then
+                            local s, e = pc(task.fn, task.m)
+                            if not s then warn("Optimizer Error in " .. (task.name or "unknown") .. ": " .. e) end
+                        end
+                    end
+                    self.ti = (self.ti % #self.t) + 1
+                    i = i + 1
+                end
+                self.phase = (self.phase + 1) % 2
+                wt(O.Config.UpdateFrequency)
+            end
+        end)
+        return
+    end
+    
+    local function triggerUpdate()
+        local now = os.clock()
+        if now - self.lastTriggerTime < 0.1 then return end
+        self.lastTriggerTime = now
+        local currentPos = cam.CFrame.Position
+        local delta = (currentPos - self.lastCamPos).Magnitude
+        if delta > O.Config.CameraMoveThreshold or O.M1.s == "Emergency" then
+            self.lastCamPos = currentPos
+            local st = os.clock()
+            local i = 0
+            while os.clock() - st < self.b and i < #self.t do
+                local task = self.t[self.ti]
+                if task then
+                    if i % 2 == self.phase % 2 then
+                        local s, e = pc(task.fn, task.m)
+                        if not s then warn("Optimizer Error in " .. (task.name or "unknown") .. ": " .. e) end
+                    end
+                end
+                self.ti = (self.ti % #self.t) + 1
+                i = i + 1
+            end
+            self.phase = (self.phase + 1) % 2
+        end
+    end
+    
+    cam:GetPropertyChangedSignal("CFrame"):Connect(triggerUpdate)
+    s1.Heartbeat:Connect(function(dt)
+        if O.M1.af < O.M1.EF then triggerUpdate() end
+    end)
+end
+
+O.M5 = {GS = O.Config.GridSize, g = {}, tr = setmetatable({}, {__mode = "k"})};
+
+function O.M5:a(o, d)
+    if not O.U.v(o) or not o:IsA("BasePart") then return end
+    local s = self.GS
+    local p = o.Position
+    local k = mf(p.X / s) .. " " .. mf(p.Y / s) .. " " .. mf(p.Z / s)
+    self.g[k] = self.g[k] or {}
+    table.insert(self.g[k], o)
+    self.tr[o] = d
+    d.gk = k
+end
+
+function O.M5:q(p, r)
+    local res = {}
+    local s = self.GS
+    local R = mf(r / s) + 1
+    local cx, cy, cz = mf(p.X / s), mf(p.Y / s), mf(p.Z / s)
+    for i = cx - R, cx + R do
+        for j = cy - R, cy + R do
+            for k = cz - R, cz + R do
+                local c = self.g[i .. " " .. j .. " " .. k]
+                if c then
+                    for l = 1, #c do
+                        res[#res + 1] = c[l]
+                    end
+                end
+            end
+        end
+    end
+    return res
+end
+
+function O.M5:rm(o)
+    local d = self.tr[o]
+    if d and d.gk then
+        local c = self.g[d.gk]
+        if c then
+            for i = #c, 1, -1 do
+                if c[i] == o then
+                    c[i] = c[#c]
+                    c[#c] = nil
+                    break
+                end
+            end
+            if #c == 0 then self.g[d.gk] = nil end
+        end
+    end
+    self.tr[o] = nil
+end
+
+O.MR = setmetatable({}, {__mode = "k"});
+
+function O:rO(m)
+    if not O.U.v(m) or not m:IsA("Model") or O.MR[m] then return end
+    local pP = m.PrimaryPart
+    if not pP then return end
+    local d = {
+        m = m,
+        pP = pP,
+        l = {z = 1, lz = 1, lc = 0},
+        ph = {s = false, simplified = false, p = {}},
+        visParts = {},  -- New: All BaseParts for visibility control
+        a = {c = nil, h = nil, f = false},
+        e = {p = {}, a = true},
+        ms = {l = {}},
+        snd = {l = {}},
+        sc = {l = {}, a = true},
+        sh = {p = {}, s = true}
+    }
+    local convertible = {}  -- Collect convertible first to avoid destroy in loop
+    local desc = m:GetDescendants()
+    for i = 1, #desc do
+        local p = desc[i]
+        if p:IsA("BasePart") and not p.Anchored and O.Config.EnableMeshConvert and p:IsA("Part") and p.Shape ~= Enum.PartShape.Block then
+            table.insert(convertible, p)
+        end
+    end
+    for _, p in ipairs(convertible) do
+        local originalParent = p.Parent
+        local originalCanCollide = p.CanCollide
+        local originalCastShadow = p.CastShadow
+        local mesh = Instance.new("MeshPart")
+        mesh.Size = p.Size
+        mesh.CFrame = p.CFrame
+        mesh.Material = p.Material
+        mesh.Color = p.Color
+        mesh.Transparency = p.Transparency
+        mesh.Reflectance = p.Reflectance
+        mesh.CastShadow = p.CastShadow
+        mesh.Anchored = p.Anchored
+        mesh.CanCollide = p.CanCollide
+        mesh.Name = p.Name
+        if O.Config.MeshSimplifyLevel > 1 then
+            mesh.Size = mesh.Size * 0.9
+        end
+        for _, child in ipairs(p:GetChildren()) do
+            child.Parent = mesh
+        end
+        p:Destroy()
+        mesh.Parent = originalParent
+        d.ph.p[#d.ph.p + 1] = {p = mesh, originalCanCollide = originalCanCollide}
+        if originalCastShadow then
+            d.sh.p[#d.sh.p + 1] = {p = mesh, os = true}
+        end
+        if p == pP then
+            d.pP = mesh
+            m.PrimaryPart = mesh
+        end
+        if O.Config.DebugMode then print("Converted to MeshPart:", mesh.Name) end
+    end
+    -- Now add remaining after conversions
+    desc = m:GetDescendants()  -- Refresh desc
+    for i = 1, #desc do
+        local p = desc[i]
+        if p:IsA("BasePart") then
+            d.visParts[#d.visParts + 1] = p  -- All for transparency
+            if not p.Anchored and #d.ph.p == 0 then  -- If not added before
+                d.ph.p[#d.ph.p + 1] = {p = p, originalCanCollide = p.CanCollide}
+            end
+            if p.CastShadow and not table.find(d.sh.p, p) then  -- Avoid duplicates
+                d.sh.p[#d.sh.p + 1] = {p = p, os = true}
+            end
+        end
+        if p:IsA("MeshPart") and p.TextureID ~= "" then
+            d.ms.l[#d.ms.l + 1] = {p = p, t = p.TextureID}
+        end
+        if p:IsA("ParticleEmitter") or p:IsA("Light") or p:IsA("Beam") or p:IsA("Trail") or p:IsA("Attachment") then
+            local prop = p:IsA("Attachment") and "Visible" or "Enabled"
+            local state = p[prop]
+            local rate = p:IsA("ParticleEmitter") and p.Rate or nil
+            d.e.p[#d.e.p + 1] = {e = p, prop = prop, state = state, rate = rate}
+        end
+        if p:IsA("Sound") then
+            d.snd.l[#d.snd.l + 1] = {s = p, op = p.Playing}
+        end
+    end
+    local h = m:FindFirstChildOfClass("Humanoid")
+    if h then
+        d.a.h = h
+        d.a.c = h:FindFirstChildOfClass("Animator")
+    end
+    O.MR[m] = d
+    O.M5:a(d.pP, d)
+    m.Destroying:Connect(function() O:urO(m) end)
+end
+
+function O:urO(m)
+    local d = O.MR[m]
+    if d then O.M5:rm(d.pP) end
+    O.MR[m] = nil
+end
+
+local function getNearbyAndSort(cP, sqr)
+    local nb = O.M5:q(cP, ms(sqr) + O.Config.GridSize / 2)
+    table.sort(nb, function(a, b)
+        return (a.Position - cP).MagnitudeSquared < (b.Position - cP).MagnitudeSquared
+    end)
+    return nb
+end
+
+function O.M6:u()
+    local ag = O.M1.a.r
+    local cP = cam.CFrame.Position
+    local VS = O.Config.VisualSqr / (ag * ag)
+    local BS = VS * 2.25
+    local H = O.Config.Hysterisis
+    local nb = getNearbyAndSort(cP, BS)
+    local maxPerUpdate = O.Config.MaxObjectsPerUpdate
+    local processed = 0
+    local rays = O.Config.OcclusionRays
+    if O.M1.af < 40 then rays = 1 end
+    local loopStart = os.clock()
+    for i = 1, #nb do
+        if processed >= maxPerUpdate or os.clock() - loopStart > 0.01 then break end
+        local pP = nb[i]
+        local d = O.M5.tr[pP]
+        if d and O.U.v(d.m) then
+            local isVisibleOnScreen = O.U.iv(pP)
+            local occluded = false
+            if O.Config.EnableOcclusionCull and isVisibleOnScreen then
+                local function isOccluded(pos)
+                    local origin = cam.CFrame.Position
+                    local dir = (pos - origin).Unit
+                    local magnitude = (pos - origin).Magnitude
+                    local rayParams = RaycastParams.new()
+                    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+                    rayParams.FilterDescendantsInstances = {lP.Character}
+                    for j = 1, rays do
+                        local offset = dir:Cross(V(0,1,0)).Unit * (j - rays / 2) * 0.5
+                        local result = s3:Raycast(origin + offset, dir * magnitude, rayParams)
+                        if result and not result.Instance:IsDescendantOf(d.m) then return true end
+                    end
+                    return false
+                end
+                occluded = isOccluded(pP.Position)
+            end
+            local l = d.l
+            local dS = (pP.Position - cP).MagnitudeSquared
+            local tZ = 1
+            if O.Config.EnableOcclusionCull and (not isVisibleOnScreen or occluded) then
+                tZ = 3
+            elseif dS > BS then tZ = 3
+            elseif dS > VS then tZ = 2 end
+            if l.z ~= tZ and os.clock() - l.lc > H then
+                l.lz = l.z
+                l.z = tZ
+                l.lc = os.clock()
+                task.defer(function()
+                    if tZ == 3 then
+                        d.m.Parent = nil
+                    elseif tZ == 2 then
+                        if l.lz == 3 then d.m.Parent = O.os end
+                        for _, vp in ipairs(d.visParts) do
+                            if O.U.v(vp) then vp.LocalTransparencyModifier = 1 end
+                        end
+                    elseif tZ == 1 then
+                        if l.lz == 3 then d.m.Parent = O.os end
+                        for _, vp in ipairs(d.visParts) do
+                            if O.U.v(vp) then vp.LocalTransparencyModifier = 0 end  -- Reset to visible
+                        end
+                    end
+                end)
+            end
+            if l.z == 1 then
+                local tr = mc(dS / VS, 0, 0.9)
+                for _, vp in ipairs(d.visParts) do
+                    if O.U.v(vp) then vp.LocalTransparencyModifier = tr end
+                end
+                local f = dS < VS * 0.4 and 0 or 2
+                for _, vp in ipairs(d.visParts) do
+                    if O.U.v(vp) and vp.RenderFidelity.Value ~= f then
+                        vp.RenderFidelity = Enum.RenderFidelity.FromValue(f)
+                    end
+                end
+            end
+            local shFar = dS > O.Config.ShadowSqr / (ag * ag)
+            if d.sh.s ~= shFar then
+                d.sh.s = shFar
+                for j = 1, #d.sh.p do
+                    local sd = d.sh.p[j]
+                    if O.U.v(sd.p) then
+                        sd.p.CastShadow = not shFar and sd.os or false
+                    end
+                end
+            end
+            processed = processed + 1
+            if O.Config.DebugMode and processed > 800 then print("High process count in LOD:", processed) end
+        end
+    end
+end
+
+function O.M7:u()
+    local ag = O.M1.a.p
+    local cP = cam.CFrame.Position
+    local SS = O.Config.PhysicsSqr / (ag * ag)
+    local op_name, df_name = O.cg.op_name, O.cg.df_name
+    local nb = getNearbyAndSort(cP, SS)
+    local maxPerUpdate = O.Config.MaxObjectsPerUpdate
+    local processed = 0
+    local loopStart = os.clock()
+    for i = 1, #nb do
+        if processed >= maxPerUpdate or os.clock() - loopStart > 0.01 then break end
+        local pP = nb[i]
+        local d = O.M5.tr[pP]
+        if d and O.U.v(d.m) then
+            local ph = d.ph
+            local sS = (pP.Position - cP).MagnitudeSquared > SS
+            local gridKey = d.gk
+            local cellCount = # (O.M5.g[gridKey] or {})
+            local simplify = O.Config.EnableMeshConvert and cellCount > 500 and O.M1.s == "Emergency"
+            local changed = ph.s ~= sS or ph.simplified ~= simplify
+            if changed then
+                ph.s = sS
+                ph.simplified = simplify
+                local g = sS and op_name or df_name
+                local useOriginal = not sS and not simplify
+                for j = 1, #ph.p do
+                    local pd = ph.p[j]
+                    if O.U.v(pd.p) then
+                        pd.p.CollisionGroup = g
+                        pd.p.CanCollide = useOriginal and pd.originalCanCollide or false
+                        pd.p.CanTouch = pd.p.CanCollide
+                        pd.p.CanQuery = pd.p.CanCollide
+                    end
+                end
+            end
+            processed = processed + 1
+        end
+    end
+end
+
+function O.M15:u()
+    local ag = O.M1.a.p
+    local cP = cam.CFrame.Position
+    local FS = O.Config.AnimSqr / (ag * ag)
+    local nb = getNearbyAndSort(cP, FS)
+    local maxPerUpdate = O.Config.MaxObjectsPerUpdate
+    local processed = 0
+    local loopStart = os.clock()
+    for i = 1, #nb do
+        if processed >= maxPerUpdate or os.clock() - loopStart > 0.01 then break end
+        local pP = nb[i]
+        local d = O.M5.tr[pP]
+        if d and O.U.v(d.m) then
+            local a = d.a
+            if a.c then
+                local sF = (pP.Position - cP).MagnitudeSquared > FS
+                if a.f ~= sF then
+                    a.f = sF
+                    if O.U.v(a.c) then a.c.Enabled = not sF end
+                    if O.U.v(a.h) then a.h.PlatformStand = sF end
+                end
+            end
+            processed = processed + 1
+        end
+    end
+end
+
+function O.M16:u()
+    local ag = O.M1.a.d
+    local cP = cam.CFrame.Position
+    local NTS = O.Config.TextureSqr / (ag * ag)
+    local nb = getNearbyAndSort(cP, NTS)
+    local maxPerUpdate = O.Config.MaxObjectsPerUpdate
+    local processed = 0
+    local loopStart = os.clock()
+    for i = 1, #nb do
+        if processed >= maxPerUpdate or os.clock() - loopStart > 0.01 then break end
+        local pP = nb[i]
+        local d = O.M5.tr[pP]
+        if d and O.U.v(d.m) and #d.ms.l > 0 then
+            local nT = (pP.Position - cP).MagnitudeSquared > NTS
+            for j = 1, #d.ms.l do
+                local md = d.ms.l[j]
+                if O.U.v(md.p) then
+                    local tT = nT and "" or md.t
+                    if md.p.TextureID ~= tT then
+                        md.p.TextureID = tT
+                    end
+                end
+            end
+            processed = processed + 1
+        end
+    end
+end
+
+function O.M17:u()
+    local ag = O.M1.a.ef
+    local cP = cam.CFrame.Position
+    local PS = O.Config.ParticleSqr / (ag * ag)
+    local nb = getNearbyAndSort(cP, PS)
+    local maxPerUpdate = O.Config.MaxObjectsPerUpdate
+    local processed = 0
+    local fpsScale = mc(O.M1.af / 60, O.Config.ParticleScaleMin, 1)
+    local loopStart = os.clock()
+    for i = 1, #nb do
+        if processed >= maxPerUpdate or os.clock() - loopStart > 0.01 then break end
+        local pP = nb[i]
+        local d = O.M5.tr[pP]
+        if d and O.U.v(d.m) and #d.e.p > 0 then
+            local distSqr = (pP.Position - cP).MagnitudeSquared
+            local far = distSqr > PS
+            local scale = far and 0 or mc(1 - (distSqr / PS), O.Config.ParticleScaleMin, 1) * fpsScale
+            if d.e.a ~= (scale > 0) then
+                d.e.a = scale > 0
+            end
+            for j = 1, #d.e.p do
+                local ed = d.e.p[j]
+                if O.U.v(ed.e) then
+                    ed.e[ed.prop] = scale > 0 and ed.state or false
+                    if ed.rate then ed.e.Rate = ed.rate * scale end
+                end
+            end
+            processed = processed + 1
+        end
+    end
+end
+
+function O.M18:u()
+    local ag = O.M1.a.c
+    local cP = cam.CFrame.Position
+    local SNS = O.Config.SoundSqr / (ag * ag)
+    local nb = getNearbyAndSort(cP, SNS)
+    local maxPerUpdate = O.Config.MaxObjectsPerUpdate
+    local processed = 0
+    local loopStart = os.clock()
+    for i = 1, #nb do
+        if processed >= maxPerUpdate or os.clock() - loopStart > 0.01 then break end
+        local pP = nb[i]
+        local d = O.M5.tr[pP]
+        if d and O.U.v(d.m) and #d.snd.l > 0 then
+            local far = (pP.Position - cP).MagnitudeSquared > SNS
+            for j = 1, #d.snd.l do
+                local sd = d.snd.l[j]
+                if O.U.v(sd.s) then
+                    if far and sd.s.Playing then
+                        sd.s:Pause()
+                    elseif not far and not sd.s.Playing and sd.op then
+                        sd.s:Resume()
+                    end
+                end
+            end
+            processed = processed + 1
+        end
+    end
+end
+
+function O.M19:u()
+    local ag = O.M1.a.v
+    local cP = cam.CFrame.Position
+    local SCS = O.Config.ScriptSqr / (ag * ag)
+    local nb = getNearbyAndSort(cP, SCS)
+    local maxPerUpdate = O.Config.MaxObjectsPerUpdate
+    local processed = 0
+    local loopStart = os.clock()
+    for i = 1, #nb do
+        if processed >= maxPerUpdate or os.clock() - loopStart > 0.01 then break end
+        local pP = nb[i]
+        local d = O.M5.tr[pP]
+        if d and O.U.v(d.m) then
+            local far = (pP.Position - cP).MagnitudeSquared > SCS
+            if #d.sc.l == 0 then
+                local desc = d.m:GetDescendants()
+                for j = 1, #desc do
+                    local s = desc[j]
+                    if s:IsA("LocalScript") then
+                        d.sc.l[#d.sc.l + 1] = {s = s, od = s.Disabled}
+                    end
+                end
+            end
+            if d.sc.a ~= not far then
+                d.sc.a = not far
+                for j = 1, #d.sc.l do
+                    local sd = d.sc.l[j]
+                    if O.U.v(sd.s) then
+                        sd.s.Disabled = far or sd.od
+                    end
+                end
+            end
+            processed = processed + 1
+        end
+    end
+end
+
+function O:A()
+    if not s3.StreamingEnabled then
+        s3.StreamingEnabled = true
+    end
+    O.os = Instance.new("Folder")
+    O.os.Name = "Z_S"
+    O.os.Parent = s3  -- Workspace
+    O.cg = {op_name = "O_P", df_name = "Default"}
+    s6:CreateCollisionGroup(O.cg.op_name)
+    s6:CollisionGroupSetCollidable(O.cg.op_name, O.cg.df_name, false)
+    local function ot(i)
+        if i:IsA("Model") then O:rO(i) end
+    end
+    for _, i in ipairs(s2:GetTagged("Managed")) do ot(i) end
+    s2:GetInstanceAddedSignal("Managed"):Connect(ot)
+    s2:GetInstanceRemovedSignal("Managed"):Connect(function(i)
+        if i:IsA("Model") then O:urO(i) end
+    end)
+    task.delay(1, function() O._r = true end)
+    s1.Heartbeat:Connect(function(dt)
+        if O._r then O.M1:u(dt) end
+    end)
+    O.M4:a({name = "LOD", m = O.M6, fn = O.M6.u})
+    O.M4:a({name = "PHY", m = O.M7, fn = O.M7.u})
+    O.M4:a({name = "ANI", m = O.M15, fn = O.M15.u})
+    O.M4:a({name = "MSH", m = O.M16, fn = O.M16.u})
+    O.M4:a({name = "PRT", m = O.M17, fn = O.M17.u})
+    O.M4:a({name = "SND", m = O.M18, fn = O.M18.u})
+    O.M4:a({name = "SCR", m = O.M19, fn = O.M19.u})
+    O.M4:s()
+end
+
+O:A()
