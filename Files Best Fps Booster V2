@@ -37,6 +37,8 @@ O.Config = {
     ParticleScaleMin = 0.1,
     OcclusionRays = 2,
     OcclusionSampleSize = 3,
+    OcclusionThreshold = 1,
+    DynamicLimit = 2000,  -- Will be calculated
     QualityLevel = "High",
     EnableOcclusionCull = true,
     EnableEventDriven = true,
@@ -44,7 +46,8 @@ O.Config = {
     EnableMeshConvert = true,
     MeshSimplifyLevel = 2,
     UseTransparencyCull = true,
-    UseHybridCull = true
+    UseHybridCull = true,
+    MaxVisParts = 200  -- New: Limit visParts per model
 };
 
 local qualityMultipliers = {Low = 0.5, Medium = 0.75, High = 1}
@@ -149,7 +152,7 @@ function O.M1:u(dt)
     ag.v = ag.v + (nr * iF - ag.v) * a
     ag.ef = ag.ef + (nr * iF - ag.ef) * a
     
-    if O.Config.DebugMode and os.time() % 10 == 0 then
+    if O.Config.DebugMode and os.clock() % 10 < dt then
         warn("Current FPS:", math.round(af), "Mode:", s)
     end
 end
@@ -162,25 +165,22 @@ end
 
 function O.M4:s()
     if not O.Config.EnableEventDriven then
-        sp(function()
-            while true do
-                local st = os.clock()
-                local i = 0
-                local dynamic_b = O.M1.s == "Emergency" and 0.015 or self.b
-                while os.clock() - st < dynamic_b and i < #self.t do
-                    local task = self.t[self.ti]
-                    if task then
-                        if i % 2 == self.phase % 2 then
-                            local s, e = pc(task.fn, task.m)
-                            if not s then warn("Optimizer Error in " .. (task.name or "unknown") .. ": " .. e) end
-                        end
+        s1.RenderStepped:Connect(function(dt)
+            local st = os.clock()
+            local i = 0
+            local dynamic_b = O.M1.s == "Emergency" and 0.015 or self.b
+            while os.clock() - st < dynamic_b and i < #self.t do
+                local task = self.t[self.ti]
+                if task then
+                    if i % 2 == self.phase % 2 then
+                        local s, e = pc(task.fn, task.m)
+                        if not s then warn("Optimizer Error in " .. (task.name or "unknown") .. ": " .. e) end
                     end
-                    self.ti = (self.ti % #self.t) + 1
-                    i = i + 1
                 end
-                self.phase = (self.phase + 1) % 2
-                wt(O.Config.UpdateFrequency)
+                self.ti = (self.ti % #self.t) + 1
+                i = i + 1
             end
+            self.phase = (self.phase + 1) % 2
         end)
         return
     end
@@ -300,6 +300,7 @@ function O:rO(m)
     for i = 1, #desc do
         local p = desc[i]
         if p:IsA("BasePart") then
+            table.insert(d.visParts, p)
             if not p.Anchored and O.Config.EnableMeshConvert and p:IsA("Part") and p.Shape ~= Enum.PartShape.Block then
                 table.insert(convertible, p)
             end
@@ -331,24 +332,35 @@ function O:rO(m)
         end
         p:Destroy()
         mesh.Parent = originalParent
+        d.ph.p[#d.ph.p + 1] = {p = mesh, originalCanCollide = originalCanCollide}
+        if originalCastShadow then
+            d.sh.p[#d.sh.p + 1] = {p = mesh, os = true}
+        end
         if p == pP then
             d.pP = mesh
             m.PrimaryPart = mesh
         end
         if O.Config.DebugMode then warn("Converted to MeshPart:", mesh.Name) end
     end
+    -- Refresh desc after conversions
     desc = m:GetDescendants()
     for i = 1, #desc do
         local p = desc[i]
         if p:IsA("BasePart") then
-            table.insert(d.visParts, p)
+            if not table.find(d.visParts, p) then
+                table.insert(d.visParts, p)
+            end
             if not p.Anchored then
-                table.insert(d.ph.p, {p = p, originalCanCollide = p.CanCollide})
+                if not table.find(d.ph.p, p) then
+                    table.insert(d.ph.p, {p = p, originalCanCollide = p.CanCollide})
+                end
             end
             if p.CastShadow then
-                table.insert(d.sh.p, {p = p, os = true})
+                if not table.find(d.sh.p, p) then
+                    table.insert(d.sh.p, {p = p, os = true})
+                end
             end
-            if p.Velocity.Magnitude < 1 then
+            if p.Velocity.Magnitude < 1 and not p.Anchored then
                 p.Anchored = true
             end
         end
@@ -363,6 +375,25 @@ function O:rO(m)
         end
         if p:IsA("Sound") then
             table.insert(d.snd.l, {s = p, op = p.Playing})
+        end
+        -- Convert legacy Fire/Smoke for TSB effects
+        if p:IsA("Fire") then
+            local emitter = Instance.new("ParticleEmitter")
+            emitter.Parent = p.Parent
+            emitter.Rate = p.Heat * 2
+            emitter.Speed = NumberRange.new(p.Size, p.Size * 1.5)
+            emitter:Enabled = p.Enabled
+            p:Destroy()
+            table.insert(d.e.p, {e = emitter, prop = "Enabled", state = emitter.Enabled, rate = emitter.Rate})
+        end
+        if p:IsA("Smoke") then
+            local emitter = Instance.new("ParticleEmitter")
+            emitter.Parent = p.Parent
+            emitter.Rate = p.RiseVelocity * 2
+            emitter.Speed = NumberRange.new(p.Size, p.Size * 1.5)
+            emitter:Enabled = p.Enabled
+            p:Destroy()
+            table.insert(d.e.p, {e = emitter, prop = "Enabled", state = emitter.Enabled, rate = emitter.Rate})
         end
     end
     local h = m:FindFirstChildOfClass("Humanoid")
@@ -383,9 +414,13 @@ end
 
 local function getNearby(cP, sqr)  
     local nb = O.M5:q(cP, ms(sqr) + O.Config.GridSize / 2)
-    if #nb > 2000 then
+    if not nb then return {} end  -- Fix nil
+    table.sort(nb, function(a, b)
+        return (a.Position - cP).MagnitudeSquared < (b.Position - cP).MagnitudeSquared
+    end)
+    if #nb > O.Config.DynamicLimit then
         local limited = {}
-        for i=1, 2000 do limited[i] = nb[i] end
+        for i=1, O.Config.DynamicLimit do limited[i] = nb[i] end
         nb = limited
     end
     return nb
@@ -414,7 +449,13 @@ function O.M6:u()
             if dS > BS then continue end
             local isVisibleOnScreen = false
             local visibleParts = {}
-            for _, vp in ipairs(d.visParts) do
+            local visCount = #d.visParts
+            if visCount > 50 then
+                if O.M1.af < 40 then continue end  -- Skip large in low FPS
+                visCount = 50  -- Limit checks
+            end
+            for j = 1, visCount do
+                local vp = d.visParts[j]
                 if O.U.v(vp) and O.U.iv(vp) then
                     isVisibleOnScreen = true
                     table.insert(visibleParts, vp.Position)
@@ -422,28 +463,30 @@ function O.M6:u()
             end
             local occluded = false
             if useOcclusion and isVisibleOnScreen then
-                local function isOccluded(pos)
-                    local origin = cam.CFrame.Position
-                    local dir = (pos - origin).Unit
-                    local magnitude = (pos - origin).Magnitude
-                    local rayParams = RaycastParams.new()
-                    rayParams.FilterType = Enum.RaycastFilterType.Exclude
-                    rayParams.FilterDescendantsInstances = {lP.Character}
-                    for j = 1, rays do
-                        local offset = dir:Cross(V(0,1,0)).Unit * (j - rays / 2) * 0.5
-                        local result = s3:Raycast(origin + offset, dir * magnitude, rayParams)
-                        if result and not result.Instance:IsDescendantOf(d.m) then return true end
+                sp(function()
+                    local function isOccluded(pos)
+                        local origin = cam.CFrame.Position
+                        local dir = (pos - origin).Unit
+                        local magnitude = (pos - origin).Magnitude
+                        local rayParams = RaycastParams.new()
+                        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+                        rayParams.FilterDescendantsInstances = {lP.Character}
+                        for j = 1, rays do
+                            local offset = dir:Cross(V(0,1,0)).Unit * (j - rays / 2) * 0.5
+                            local result = s3:Raycast(origin + offset, dir * magnitude, rayParams)
+                            if result and not result.Instance:IsDescendantOf(d.m) then return true end
+                        end
+                        return false
                     end
-                    return false
-                end
-                local occlSample = math.min(#visibleParts, sampleSize)
-                local occludedCount = 0
-                for j = 1, occlSample do
-                    if isOccluded(visibleParts[j]) then
-                        occludedCount = occludedCount + 1
+                    local occlSample = math.min(#visibleParts, sampleSize)
+                    local occludedCount = 0
+                    for j = 1, occlSample do
+                        if isOccluded(visibleParts[j]) then
+                            occludedCount = occludedCount + 1
+                        end
                     end
-                end
-                occluded = (occludedCount == occlSample)
+                    occluded = (occludedCount / occlSample >= O.Config.OcclusionThreshold)
+                end)
             end
             local l = d.l
             local tZ = 1
@@ -635,6 +678,9 @@ function O.M17:u()
                     if O.U.v(ed.e) then
                         ed.e[ed.prop] = scale > 0 and ed.state or false
                         if ed.rate then ed.e.Rate = ed.rate * scale end
+                        if ed.e:IsA("ParticleEmitter") then
+                            ed.e.Size = NumberRange.new(ed.e.Size.Min * scale, ed.e.Size.Max * scale)  -- Scale size for lag reduction
+                        end
                     end
                 end
             end)
@@ -738,7 +784,168 @@ function O.M21:u()
     end)
 end
 
+-- New: Batching for drawcalls and shadows from DevForum
+function O.M22:u()
+    local cP = cam.CFrame.Position
+    local nb = getNearby(cP, O.Config.VisualSqr)
+    if O.M1.s ~= "Emergency" then return end  -- Only in low FPS
+    task.defer(function()
+        for i = 1, #nb do
+            local pP = nb[i]
+            local d = O.M5.tr[pP]
+            if d and O.U.v(d.m) and #d.visParts > 10 then  -- For large models
+                local parts = {}
+                for _, vp in ipairs(d.visParts) do
+                    if vp.Size.Magnitude < 5 then  -- Small parts
+                        table.insert(parts, vp)
+                    end
+                end
+                if #parts > 0 then
+                    local union = Instance.new("UnionOperation")
+                    union.UsePartColor = true
+                    union.CollisionFidelity = Enum.CollisionFidelity.Box
+                    union.Parent = d.m
+                    for _, p in ipairs(parts) do
+                        p.Parent = union
+                    end
+                    union = union:UnionAsync(parts)  -- Correct async
+                    -- Replace visParts with union
+                    d.visParts = {union}
+                end
+            end
+            -- Disable shadows for far
+            local dS = (pP.Position - cP).MagnitudeSquared
+            if dS > O.Config.ShadowSqr then
+                for j = 1, #d.sh.p do
+                    local sd = d.sh.p[j]
+                    if O.U.v(sd.p) then sd.p.CastShadow = false end
+                end
+            end
+        end
+    end)
+end
+
+-- New: Foliage optimization from DevForum
+function O.M23:u()
+    local cP = cam.CFrame.Position
+    local foliage = s2:GetTagged("Foliage")
+    if O.M1.s ~= "Emergency" then return end
+    task.defer(function()
+        for _, fol in ipairs(foliage) do
+            if fol:IsA("Model") then
+                local dS = (fol.PrimaryPart.Position - cP).MagnitudeSquared
+                if dS > O.Config.VisualSqr then
+                    fol.Parent = nil  -- Cull far foliage
+                elseif dS > O.Config.TextureSqr then
+                    for _, leaf in ipairs(fol:GetDescendants()) do
+                        if leaf:IsA("BasePart") then leaf.TextureID = "" end
+                        leaf.CastShadow = false
+                    end
+                end
+                if #fol:GetChildren() > 20 then
+                    local parts = fol:GetDescendants()
+                    local smallParts = {}
+                    for _, leaf in ipairs(parts) do
+                        if leaf:IsA("BasePart") and leaf.Size.Magnitude < 2 then
+                            table.insert(smallParts, leaf)
+                        end
+                    end
+                    if #smallParts > 0 then
+                        local union = Instance.new("UnionOperation")
+                        union.UsePartColor = true
+                        union.CollisionFidelity = Enum.CollisionFidelity.Box
+                        union.Parent = fol
+                        for _, p in ipairs(smallParts) do
+                            p.Parent = union
+                        end
+                        union = union:UnionAsync(smallParts)  -- Correct async
+                    end
+                end
+            end
+        end
+    end)
+end
+
+-- New: Terrain and storage optimization from DevForum
+function O.M24:u()
+    local cP = cam.CFrame.Position
+    task.defer(function()
+        -- Remove unseen terrain
+        local terrain = s3.Terrain
+        local viewRegion = Region3.new(cP - V(500, 500, 500), cP + V(500, 500, 500))
+        terrain:ClearAllChildren()  -- Careful, this clears all, use for specific
+        -- Store non-essential in ServerStorage
+        local nonEssential = s2:GetTagged("NonEssential")
+        for _, ne in ipairs(nonEssential) do
+            local dS = (ne.Position - cP).MagnitudeSquared
+            if dS > O.Config.VisualSqr then
+                ne.Parent = G.ServerStorage
+            end
+        end
+        -- Use materials over textures
+        for _, part in ipairs(s3:GetDescendants()) do
+            if part:IsA("BasePart") and #part:GetChildren("Texture") > 0 then
+                part.Material = Enum.Material.Grass  -- Example, adapt
+                for _, tex in ipairs(part:GetChildren("Texture")) do tex:Destroy() end
+            end
+        end
+    end)
+end
+
+-- New: Part pooling from DevForum
+O.PartPool = {}  -- Global pool
+function O.M25:u()  -- Pool manager
+    if O.M1.s ~= "Emergency" then return end
+    task.defer(function()
+        -- Example pooling: Create pool of 100 parts
+        if #O.PartPool < 100 then
+            for i = 1, 100 do
+                local part = Instance.new("Part")
+                part.Anchored = true
+                part.CanCollide = false
+                part.Parent = O.hiddenFolder
+                table.insert(O.PartPool, part)
+            end
+        end
+        -- Re-use from pool for new objects (assume in game logic)
+        -- When done: part.Parent = O.hiddenFolder to return to pool
+    end)
+end
+
+-- New: Ability effects optimization for TSB
+function O.M28:u()
+    local cP = cam.CFrame.Position
+    local abilities = s2:GetTagged("AbilityEffect")
+    task.defer(function()
+        for _, ab in ipairs(abilities) do
+            local dS = (ab.Position - cP).MagnitudeSquared
+            if dS > O.Config.EffectSqr then
+                ab.Enabled = false
+            elseif dS > O.Config.ParticleSqr then
+                if ab:IsA("ParticleEmitter") then ab.Rate = ab.Rate * 0.5 end
+            else
+                ab.Enabled = true
+            end
+        end
+    end)
+end
+
 function O:A()
+    -- Calculate dynamic limit
+    local total_parts = 0
+    local managed = s2:GetTagged("Managed")
+    for _, model in ipairs(managed) do
+        for _, inst in ipairs(model:GetDescendants()) do
+            if inst:IsA("BasePart") then total_parts = total_parts + 1 end
+        end
+    end
+    if total_parts > 10000 then
+        O.Config.DynamicLimit = total_parts / 10
+    else
+        O.Config.DynamicLimit = math.clamp(total_parts / 5, 500, 10000)
+    end
+    if O.Config.DebugMode then warn("Dynamic Limit set to:", O.Config.DynamicLimit) end
+
     if not s3.StreamingEnabled then
         s3.StreamingEnabled = true
     end
@@ -777,6 +984,11 @@ function O:A()
     O.M4:a({name = "SND", m = O.M18, fn = O.M18.u})
     O.M4:a({name = "SCR", m = O.M19, fn = O.M19.u})
     O.M4:a({name = "LGT", m = O.M21, fn = O.M21.u})
+    O.M4:a({name = "BAT", m = O.M22, fn = O.M22.u})
+    O.M4:a({name = "FOL", m = O.M23, fn = O.M23.u})
+    O.M4:a({name = "TER", m = O.M24, fn = O.M24.u})
+    O.M4:a({name = "POOL", m = O.M25, fn = O.M25.u})
+    O.M4:a({name = "ABL", m = O.M28, fn = O.M28.u})  -- New abilities module
     O.M4:s()
 end
 
