@@ -4,9 +4,11 @@ local Players = game:GetService("Players")
 
 local table_insert = table.insert
 local table_clear = table.clear
+local table_sort = table.sort
+local table_remove = table.remove
 
 type Maybe<T> = T | nil
-type CullingClass = "ParticleEmitter" | "Light" | "Sound" | "Smoke" | "Fire" | "Trail"
+type CullingClass = "ParticleEmitter" | "Light" | "Smoke" | "Fire" | "Trail"
 type OriginalProperties = { [string]: any }
 
 type ManagedObjectData = {
@@ -18,29 +20,29 @@ type ManagedObjectData = {
 
 local AutonomousCullingService = {}
 
-local CONFIG = {
+local CULLING_CONFIG = {
 	UpdateInterval = 0.15,
 	FpsReduceThreshold = 45,
 	FpsRestoreThreshold = 55,
 	CullableClasses = {
 		ParticleEmitter = { DistSqr = 150 * 150, MaxCount = 30 },
 		Light = { DistSqr = 180 * 180, MaxCount = 15 },
-		Sound = { DistSqr = 100 * 100, MaxCount = 20 },
 		Smoke = { DistSqr = 160 * 160, MaxCount = 25 },
 		Fire = { DistSqr = 160 * 160, MaxCount = 25 },
 		Trail = { DistSqr = 170 * 170, MaxCount = 25 },
 	}
 }
 
-local camera: Maybe<Camera> = Workspace.CurrentCamera
+local camera: Maybe<Camera>
 local managedObjects: { [Instance]: ManagedObjectData } = setmetatable({}, {__mode = "k"})
-local candidates: { [string]: {{obj: Instance, distSqr: number}} } = {}
+local candidates: { [CullingClass]: {{instance: Instance, distSqr: number}} } = {}
+local fpsTracker: {number} = {}
 
 local updateAccumulator: number = 0
-local lastFps: number = 60
-local isProcessing: boolean = false
-local renderSteppedConnection: Maybe<RBXScriptConnection>
+
+local heartbeatConnection: Maybe<RBXScriptConnection>
 local descendantAddedConnection: Maybe<RBXScriptConnection>
+local descendantRemovingConnection: Maybe<RBXScriptConnection>
 local cameraChangedConnection: Maybe<RBXScriptConnection>
 
 local function getPosition(instance: Instance): (Maybe<Vector3>)
@@ -61,64 +63,69 @@ end
 
 local function shouldAlwaysKeep(obj: Instance): boolean
 	if not obj.Parent then return false end
-	if obj:IsA("Accessory") then return true end
 	
 	local localPlayer = Players.LocalPlayer
-	local character = localPlayer and localPlayer.Character
-	if not character then return false end
+	if not localPlayer then return true end
 	
-	return obj:IsDescendantOf(character)
+	local character = localPlayer.Character
+	local backpack = localPlayer:FindFirstChildOfClass("Backpack")
+	
+	if character and obj:IsDescendantOf(character) then return true end
+	if backpack and obj:IsDescendantOf(backpack) then return true end
+	
+	return false
 end
 
-local function hideObject(data: ManagedObjectData)
-	pcall(function()
-		if data.hidden then return end
+local function handleObjectState(data: ManagedObjectData, shouldHide: boolean)
+	local success, err = pcall(function()
+		if data.hidden == shouldHide then return end
+		
 		local instance = data.instance
 		if not instance or not instance.Parent then return end
 
-		data.originalProperties = {}
+		data.hidden = shouldHide
 		
-		if instance:IsA("ParticleEmitter") or instance:IsA("Trail") or instance:IsA("Light") or instance:IsA("Smoke") or instance:IsA("Fire") then
-			data.originalProperties.Enabled = instance.Enabled
-			instance.Enabled = false
-		elseif instance:IsA("Sound") then
-			data.originalProperties.IsPlaying = instance.IsPlaying
-			if instance.IsPlaying then
-				instance:Pause()
+		if shouldHide then
+			data.originalProperties = {}
+			if instance:IsA("ParticleEmitter") then
+				data.originalProperties.Rate = instance.Rate
+				instance.Rate = 0
+			else
+				data.originalProperties.Enabled = instance.Enabled
+				instance.Enabled = false
+			end
+		else
+			if instance:IsA("ParticleEmitter") then
+				if data.originalProperties.Rate ~= nil then
+					instance.Rate = data.originalProperties.Rate
+				end
+				data.originalProperties.Rate = nil
+			else
+				if data.originalProperties.Enabled ~= nil then
+					instance.Enabled = data.originalProperties.Enabled
+				end
+				data.originalProperties.Enabled = nil
 			end
 		end
-		data.hidden = true
 	end)
+
+	if not success then
+		warn("AutonomousCullingService Error:", err)
+	end
 end
 
-local function restoreObject(data: ManagedObjectData)
-	pcall(function()
-		if not data.hidden then return end
-		local instance = data.instance
-		if not instance or not instance.Parent then return end
-		
-		if instance:IsA("ParticleEmitter") or instance:IsA("Trail") or instance:IsA("Light") or instance:IsA("Smoke") or instance:IsA("Fire") then
-			if data.originalProperties.Enabled ~= nil then
-				instance.Enabled = data.originalProperties.Enabled
-			end
-		elseif instance:IsA("Sound") then
-			if data.originalProperties.IsPlaying then
-				instance:Play()
-			end
-		end
-		
-		data.originalProperties = {}
-		data.hidden = false
-	end)
-end
+local function getAdaptiveMultiplier(): number
+	if #fpsTracker < 5 then return 1.0 end
+	
+	local sum = 0
+	for _, fps in ipairs(fpsTracker) do
+		sum += fps
+	end
+	local averageFps = sum / #fpsTracker
 
-local function getAdaptiveMultiplier(dt: number): number
-	if dt == 0 then return 1.0 end
-	local fps = 1 / dt
-	lastFps = lastFps * 0.9 + fps * 0.1
-	if lastFps < CONFIG.FpsReduceThreshold then
+	if averageFps < CULLING_CONFIG.FpsReduceThreshold then
 		return 0.6
-	elseif lastFps < CONFIG.FpsRestoreThreshold then
+	elseif averageFps < CULLING_CONFIG.FpsRestoreThreshold then
 		return 0.85
 	end
 	return 1.0
@@ -127,7 +134,7 @@ end
 local function onDescendantAdded(descendant: Instance)
 	if managedObjects[descendant] then return end
 
-	for className, _ in pairs(CONFIG.CullableClasses) do
+	for className, _ in pairs(CULLING_CONFIG.CullableClasses) do
 		if descendant:IsA(className) then
 			managedObjects[descendant] = {
 				instance = descendant,
@@ -140,78 +147,80 @@ local function onDescendantAdded(descendant: Instance)
 	end
 end
 
-local function processWorkspace(dt: number)
-	if isProcessing then return end
-	isProcessing = true
-	
-	updateAccumulator += dt
-	if updateAccumulator < CONFIG.UpdateInterval then 
-		isProcessing = false
-		return 
+local function onDescendantRemoving(descendant: Instance)
+	if managedObjects[descendant] then
+		handleObjectState(managedObjects[descendant], false)
+		managedObjects[descendant] = nil
 	end
-	updateAccumulator -= CONFIG.UpdateInterval
+end
 
-	if not camera then 
-		isProcessing = false
-		return 
+local function processWorkspace(dt: number)
+	updateAccumulator += dt
+	
+	table_insert(fpsTracker, 1 / dt)
+	if #fpsTracker > 10 then
+		table_remove(fpsTracker, 1)
 	end
-	
-	local cameraPos = camera.CFrame.Position
-	local multiplier = getAdaptiveMultiplier(dt)
-	
-	for className, _ in pairs(CONFIG.CullableClasses) do
-		candidates[className] = candidates[className] or {}
-		table_clear(candidates[className])
-	end
-	
-	for instance, data in pairs(managedObjects) do
-		if instance.Parent and not shouldAlwaysKeep(instance) then
-			local pos = getPosition(instance)
-			if pos then
-				local cullInfo = CONFIG.CullableClasses[data.className]
-				if cullInfo then
+
+	while updateAccumulator >= CULLING_CONFIG.UpdateInterval do
+		updateAccumulator -= CULLING_CONFIG.UpdateInterval
+
+		if not camera then return end
+		
+		local cameraPos = camera.CFrame.Position
+		local multiplier = getAdaptiveMultiplier()
+		
+		for className, _ in pairs(CULLING_CONFIG.CullableClasses) do
+			candidates[className] = candidates[className] or {}
+			table_clear(candidates[className])
+		end
+		
+		for instance, data in pairs(managedObjects) do
+			if instance.Parent and not shouldAlwaysKeep(instance) then
+				local pos = getPosition(instance)
+				if pos then
 					local offset = pos - cameraPos
 					local distSqr = offset.X*offset.X + offset.Y*offset.Y + offset.Z*offset.Z
 					
+					local cullInfo = CULLING_CONFIG.CullableClasses[data.className]
 					if distSqr < (cullInfo.DistSqr * multiplier) then
-						table_insert(candidates[data.className], {obj = instance, distSqr = distSqr})
+						table_insert(candidates[data.className], {instance = instance, distSqr = distSqr})
 					else
-						hideObject(data)
+						handleObjectState(data, true)
 					end
 				end
-			end
-		else
-			if data and data.hidden then
-				restoreObject(data)
+			else
+				if data.hidden then
+					handleObjectState(data, false)
+				end
 			end
 		end
-	end
-	
-	for className, classCandidates in pairs(candidates) do
-		table.sort(classCandidates, function(a, b) return a.distSqr < b.distSqr end)
-		local maxCount = CONFIG.CullableClasses[className].MaxCount
-		for i, item in ipairs(classCandidates) do
-			local data = managedObjects[item.obj]
-			if data then
-				if i <= maxCount then
-					restoreObject(data)
-				else
-					hideObject(data)
+
+		for className, classCandidates in pairs(candidates) do
+			table_sort(classCandidates, function(a, b) return a.distSqr < b.distSqr end)
+			
+			local maxCount = CULLING_CONFIG.CullableClasses[className].MaxCount
+			
+			for i, item in ipairs(classCandidates) do
+				local data = managedObjects[item.instance]
+				if data then
+					handleObjectState(data, i > maxCount)
 				end
 			end
 		end
 	end
-	
-	isProcessing = false
 end
 
 function AutonomousCullingService:Init()
+	camera = Workspace.CurrentCamera
+	
 	for _, descendant in ipairs(Workspace:GetDescendants()) do
 		onDescendantAdded(descendant)
 	end
 	
 	descendantAddedConnection = Workspace.DescendantAdded:Connect(onDescendantAdded)
-	renderSteppedConnection = RunService.RenderStepped:Connect(processWorkspace)
+	descendantRemovingConnection = Workspace.DescendantRemoving:Connect(onDescendantRemoving)
+	heartbeatConnection = RunService.Heartbeat:Connect(processWorkspace)
 	
 	cameraChangedConnection = Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
 		camera = Workspace.CurrentCamera
@@ -219,25 +228,30 @@ function AutonomousCullingService:Init()
 end
 
 function AutonomousCullingService:Cleanup()
-	if renderSteppedConnection then
-		renderSteppedConnection:Disconnect()
-		renderSteppedConnection = nil
+	if heartbeatConnection then
+		heartbeatConnection:Disconnect()
+		heartbeatConnection = nil
 	end
 	if descendantAddedConnection then
 		descendantAddedConnection:Disconnect()
 		descendantAddedConnection = nil
+	end
+	if descendantRemovingConnection then
+		descendantRemovingConnection:Disconnect()
+		descendantRemovingConnection = nil
 	end
 	if cameraChangedConnection then
 		cameraChangedConnection:Disconnect()
 		cameraChangedConnection = nil
 	end
 
-	for _, data in pairs(managedObjects) do
+	for instance, data in pairs(managedObjects) do
 		if data.hidden then
-			restoreObject(data)
+			handleObjectState(data, false)
 		end
 	end
 	table_clear(managedObjects)
+	table_clear(fpsTracker)
 end
 
 AutonomousCullingService:Init()
