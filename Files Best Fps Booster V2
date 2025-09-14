@@ -1,258 +1,159 @@
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
-local Players = game:GetService("Players")
+local ObjectPool = {}
+ObjectPool.__index = ObjectPool
 
-local table_insert = table.insert
-local table_clear = table.clear
-local table_sort = table.sort
-local table_remove = table.remove
+local function createPool(template: Instance, initialSize: number, maxSize: number, resetFunction: ((obj: Instance) -> ())?)
+	assert(typeof(template) == "Instance", "Template must be an Instance")
+	assert(typeof(initialSize) == "number" and initialSize >= 0, "initialSize must be a non-negative number")
+	assert(typeof(maxSize) == "number" and maxSize >= initialSize, "maxSize must be greater than or equal to initialSize")
 
-type Maybe<T> = T | nil
-type CullingClass = "ParticleEmitter" | "Light" | "Smoke" | "Fire" | "Trail"
-type OriginalProperties = { [string]: any }
+	local pool = setmetatable({}, ObjectPool)
 
-type ManagedObjectData = {
-	instance: Instance,
-	className: CullingClass,
-	originalProperties: OriginalProperties,
-	hidden: boolean,
-}
+	pool._template = template
+	pool._maxSize = maxSize
+	pool._resetFunction = resetFunction
+	pool._inactiveObjects = {}
+	pool._activeObjects = {}
 
-local AutonomousCullingService = {}
-
-local CULLING_CONFIG = {
-	UpdateInterval = 0.15,
-	FpsReduceThreshold = 45,
-	FpsRestoreThreshold = 55,
-	CullableClasses = {
-		ParticleEmitter = { DistSqr = 150 * 150, MaxCount = 30 },
-		Light = { DistSqr = 180 * 180, MaxCount = 15 },
-		Smoke = { DistSqr = 160 * 160, MaxCount = 25 },
-		Fire = { DistSqr = 160 * 160, MaxCount = 25 },
-		Trail = { DistSqr = 170 * 170, MaxCount = 25 },
+	pool._stats = {
+		totalGets = 0,
+		totalReturns = 0,
+		cacheHits = 0,
+		newCreations = 0,
 	}
-}
 
-local camera: Maybe<Camera>
-local managedObjects: { [Instance]: ManagedObjectData } = setmetatable({}, {__mode = "k"})
-local candidates: { [CullingClass]: {{instance: Instance, distSqr: number}} } = {}
-local fpsTracker: {number} = {}
-
-local updateAccumulator: number = 0
-
-local heartbeatConnection: Maybe<RBXScriptConnection>
-local descendantAddedConnection: Maybe<RBXScriptConnection>
-local descendantRemovingConnection: Maybe<RBXScriptConnection>
-local cameraChangedConnection: Maybe<RBXScriptConnection>
-
-local function getPosition(instance: Instance): (Maybe<Vector3>)
-	if instance:IsA("BasePart") then
-		return instance.Position
-	end
-	
-	local parent = instance.Parent
-	if parent then
-		if parent:IsA("BasePart") then
-			return parent.Position
-		elseif parent:IsA("Attachment") then
-			return parent.WorldPosition
-		end
-	end
-	return nil
+	return pool
 end
 
-local function shouldAlwaysKeep(obj: Instance): boolean
-	if not obj.Parent then return false end
-	
-	local localPlayer = Players.LocalPlayer
-	if not localPlayer then return true end
-	
-	local character = localPlayer.Character
-	local backpack = localPlayer:FindFirstChildOfClass("Backpack")
-	
-	if character and obj:IsDescendantOf(character) then return true end
-	if backpack and obj:IsDescendantOf(backpack) then return true end
-	
-	return false
+function ObjectPool.new(template: Instance, initialSize: number, maxSize: number, resetFunction: ((obj: Instance) -> ())?)
+	local pool = createPool(template, initialSize, maxSize, resetFunction)
+
+	for i = 1, initialSize do
+		local newObj = template:Clone()
+		newObj.Parent = nil
+		table.insert(pool._inactiveObjects, newObj)
+	end
+
+	return pool
 end
 
-local function handleObjectState(data: ManagedObjectData, shouldHide: boolean)
-	local success, err = pcall(function()
-		if data.hidden == shouldHide then return end
-		
-		local instance = data.instance
-		if not instance or not instance.Parent then return end
+function ObjectPool.newAsync(template: Instance, initialSize: number, maxSize: number, resetFunction: ((obj: Instance) -> ())?)
+	local pool = createPool(template, initialSize, maxSize, resetFunction)
 
-		data.hidden = shouldHide
-		
-		if shouldHide then
-			data.originalProperties = {}
-			if instance:IsA("ParticleEmitter") then
-				data.originalProperties.Rate = instance.Rate
-				instance.Rate = 0
-			else
-				data.originalProperties.Enabled = instance.Enabled
-				instance.Enabled = false
-			end
-		else
-			if instance:IsA("ParticleEmitter") then
-				if data.originalProperties.Rate ~= nil then
-					instance.Rate = data.originalProperties.Rate
-				end
-				data.originalProperties.Rate = nil
-			else
-				if data.originalProperties.Enabled ~= nil then
-					instance.Enabled = data.originalProperties.Enabled
-				end
-				data.originalProperties.Enabled = nil
-			end
+	task.spawn(function()
+		for i = 1, initialSize do
+			local newObj = template:Clone()
+			newObj.Parent = nil
+			table.insert(pool._inactiveObjects, newObj)
+			task.wait()
 		end
 	end)
 
-	if not success then
-		warn("AutonomousCullingService Error:", err)
-	end
+	return pool
 end
 
-local function getAdaptiveMultiplier(): number
-	if #fpsTracker < 5 then return 1.0 end
+function ObjectPool:Get()
+	self._stats.totalGets += 1
+	local obj = table.remove(self._inactiveObjects)
+
+	if obj then
+		self._stats.cacheHits += 1
+	elseif #self._activeObjects < self._maxSize then
+		self._stats.newCreations += 1
+		obj = self._template:Clone()
+		obj.Parent = nil
+	else
+		warn("[ObjectPool] Пул для '"..self._template.Name.."' достиг максимального размера (" .. tostring(self._maxSize) .. "). Не удалось получить объект.")
+		return nil
+	end
 	
-	local sum = 0
-	for _, fps in ipairs(fpsTracker) do
-		sum += fps
-	end
-	local averageFps = sum / #fpsTracker
-
-	if averageFps < CULLING_CONFIG.FpsReduceThreshold then
-		return 0.6
-	elseif averageFps < CULLING_CONFIG.FpsRestoreThreshold then
-		return 0.85
-	end
-	return 1.0
+	self._activeObjects[obj] = true
+	return obj
 end
 
-local function onDescendantAdded(descendant: Instance)
-	if managedObjects[descendant] then return end
+function ObjectPool:Return(obj: Instance)
+	if not self._activeObjects[obj] then
+		warn("[ObjectPool] Попытка вернуть в пул объект, который не принадлежит этому пулу или уже возвращен.", obj)
+		return
+	end
 
-	for className, _ in pairs(CULLING_CONFIG.CullableClasses) do
-		if descendant:IsA(className) then
-			managedObjects[descendant] = {
-				instance = descendant,
-				className = className :: CullingClass,
-				originalProperties = {},
-				hidden = false,
-			}
+	self._stats.totalReturns += 1
+	self._activeObjects[obj] = nil
+	table.insert(self._inactiveObjects, obj)
+
+	if self._resetFunction then
+		self._resetFunction(obj)
+	end
+
+	obj.Parent = nil
+end
+
+function ObjectPool:GetBatch(count: number)
+	local batch = {}
+	for i = 1, count do
+		local obj = self:Get()
+		if obj then
+			table.insert(batch, obj)
+		else
 			break
 		end
 	end
+	return batch
 end
 
-local function onDescendantRemoving(descendant: Instance)
-	if managedObjects[descendant] then
-		handleObjectState(managedObjects[descendant], false)
-		managedObjects[descendant] = nil
+function ObjectPool:ReturnBatch(objectsTable: {Instance})
+	for _, obj in ipairs(objectsTable) do
+		self:Return(obj)
 	end
 end
 
-local function processWorkspace(dt: number)
-	updateAccumulator += dt
-	
-	table_insert(fpsTracker, 1 / dt)
-	if #fpsTracker > 10 then
-		table_remove(fpsTracker, 1)
-	end
-
-	while updateAccumulator >= CULLING_CONFIG.UpdateInterval do
-		updateAccumulator -= CULLING_CONFIG.UpdateInterval
-
-		if not camera then return end
-		
-		local cameraPos = camera.CFrame.Position
-		local multiplier = getAdaptiveMultiplier()
-		
-		for className, _ in pairs(CULLING_CONFIG.CullableClasses) do
-			candidates[className] = candidates[className] or {}
-			table_clear(candidates[className])
-		end
-		
-		for instance, data in pairs(managedObjects) do
-			if instance.Parent and not shouldAlwaysKeep(instance) then
-				local pos = getPosition(instance)
-				if pos then
-					local offset = pos - cameraPos
-					local distSqr = offset.X*offset.X + offset.Y*offset.Y + offset.Z*offset.Z
-					
-					local cullInfo = CULLING_CONFIG.CullableClasses[data.className]
-					if distSqr < (cullInfo.DistSqr * multiplier) then
-						table_insert(candidates[data.className], {instance = instance, distSqr = distSqr})
-					else
-						handleObjectState(data, true)
-					end
-				end
-			else
-				if data.hidden then
-					handleObjectState(data, false)
-				end
-			end
-		end
-
-		for className, classCandidates in pairs(candidates) do
-			table_sort(classCandidates, function(a, b) return a.distSqr < b.distSqr end)
-			
-			local maxCount = CULLING_CONFIG.CullableClasses[className].MaxCount
-			
-			for i, item in ipairs(classCandidates) do
-				local data = managedObjects[item.instance]
-				if data then
-					handleObjectState(data, i > maxCount)
-				end
-			end
-		end
-	end
-end
-
-function AutonomousCullingService:Init()
-	camera = Workspace.CurrentCamera
-	
-	for _, descendant in ipairs(Workspace:GetDescendants()) do
-		onDescendantAdded(descendant)
+function ObjectPool:GetStats()
+	local activeCount = 0
+	for _ in pairs(self._activeObjects) do
+		activeCount += 1
 	end
 	
-	descendantAddedConnection = Workspace.DescendantAdded:Connect(onDescendantAdded)
-	descendantRemovingConnection = Workspace.DescendantRemoving:Connect(onDescendantRemoving)
-	heartbeatConnection = RunService.Heartbeat:Connect(processWorkspace)
+	local inactiveCount = #self._inactiveObjects
+	local totalCount = activeCount + inactiveCount
 	
-	cameraChangedConnection = Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-		camera = Workspace.CurrentCamera
-	end)
+	local hitRate = 0
+	if self._stats.totalGets > 0 then
+		hitRate = self._stats.cacheHits / self._stats.totalGets
+	end
+	
+	local pressureRatio = totalCount / self._maxSize
+	local memoryPressure = "low"
+	if pressureRatio >= 0.95 then
+		memoryPressure = "critical"
+	elseif pressureRatio >= 0.75 then
+		memoryPressure = "high"
+	elseif pressureRatio >= 0.5 then
+		memoryPressure = "moderate"
+	end
+
+	return {
+		ActiveCount = activeCount,
+		InactiveCount = inactiveCount,
+		TotalCount = totalCount,
+		MaxSize = self._maxSize,
+		HitRate = hitRate,
+		MemoryPressure = memoryPressure,
+		RawStats = self._stats,
+	}
 end
 
-function AutonomousCullingService:Cleanup()
-	if heartbeatConnection then
-		heartbeatConnection:Disconnect()
-		heartbeatConnection = nil
+function ObjectPool:ClearInactive()
+	for _, obj in ipairs(self._inactiveObjects) do
+		obj:Destroy()
 	end
-	if descendantAddedConnection then
-		descendantAddedConnection:Disconnect()
-		descendantAddedConnection = nil
-	end
-	if descendantRemovingConnection then
-		descendantRemovingConnection:Disconnect()
-		descendantRemovingConnection = nil
-	end
-	if cameraChangedConnection then
-		cameraChangedConnection:Disconnect()
-		cameraChangedConnection = nil
-	end
-
-	for instance, data in pairs(managedObjects) do
-		if data.hidden then
-			handleObjectState(data, false)
-		end
-	end
-	table_clear(managedObjects)
-	table_clear(fpsTracker)
+	self._inactiveObjects = {}
 end
 
-AutonomousCullingService:Init()
-return AutonomousCullingService
+function ObjectPool:Destroy()
+	self:ClearInactive()
+	for obj in pairs(self._activeObjects) do
+		obj:Destroy()
+	end
+	self._activeObjects = {}
+end
+
+return table.freeze(ObjectPool)
