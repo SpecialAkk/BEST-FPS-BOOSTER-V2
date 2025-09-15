@@ -4,15 +4,21 @@ ObjectPool.__index = ObjectPool
 local function createPool(template: Instance, initialSize: number, maxSize: number, resetFunction: ((obj: Instance) -> ())?)
 	assert(typeof(template) == "Instance", "Template must be an Instance")
 	assert(typeof(initialSize) == "number" and initialSize >= 0, "initialSize must be a non-negative number")
-	assert(typeof(maxSize) == "number" and maxSize >= initialSize, "maxSize must be greater than or equal to initialSize")
+	assert(typeof(maxSize) == "number" and maxSize > 0 and maxSize >= initialSize, "maxSize must be a positive number greater than or equal to initialSize")
 
 	local pool = setmetatable({}, ObjectPool)
 
 	pool._template = template
 	pool._maxSize = maxSize
 	pool._resetFunction = resetFunction
-	pool._inactiveObjects = {}
+	
+	pool._inactiveObjects = table.create(maxSize)
 	pool._activeObjects = {}
+
+	pool._activeCount = 0
+	pool._inactiveCount = 0
+	pool._first = 1
+	pool._last = 0
 
 	pool._stats = {
 		totalGets = 0,
@@ -30,7 +36,9 @@ function ObjectPool.new(template: Instance, initialSize: number, maxSize: number
 	for i = 1, initialSize do
 		local newObj = template:Clone()
 		newObj.Parent = nil
-		table.insert(pool._inactiveObjects, newObj)
+		pool._last = (pool._last % pool._maxSize) + 1
+		pool._inactiveObjects[pool._last] = newObj
+		pool._inactiveCount += 1
 	end
 
 	return pool
@@ -43,7 +51,9 @@ function ObjectPool.newAsync(template: Instance, initialSize: number, maxSize: n
 		for i = 1, initialSize do
 			local newObj = template:Clone()
 			newObj.Parent = nil
-			table.insert(pool._inactiveObjects, newObj)
+			pool._last = (pool._last % pool._maxSize) + 1
+			pool._inactiveObjects[pool._last] = newObj
+			pool._inactiveCount += 1
 			task.wait()
 		end
 	end)
@@ -53,11 +63,15 @@ end
 
 function ObjectPool:Get()
 	self._stats.totalGets += 1
-	local obj = table.remove(self._inactiveObjects)
+	local obj
 
-	if obj then
+	if self._inactiveCount > 0 then
 		self._stats.cacheHits += 1
-	elseif #self._activeObjects < self._maxSize then
+		obj = self._inactiveObjects[self._first]
+		self._inactiveObjects[self._first] = nil
+		self._first = (self._first % self._maxSize) + 1
+		self._inactiveCount -= 1
+	elseif self._activeCount < self._maxSize then
 		self._stats.newCreations += 1
 		obj = self._template:Clone()
 		obj.Parent = nil
@@ -67,6 +81,7 @@ function ObjectPool:Get()
 	end
 	
 	self._activeObjects[obj] = true
+	self._activeCount += 1
 	return obj
 end
 
@@ -78,13 +93,24 @@ function ObjectPool:Return(obj: Instance)
 
 	self._stats.totalReturns += 1
 	self._activeObjects[obj] = nil
-	table.insert(self._inactiveObjects, obj)
+	self._activeCount -= 1
 
 	if self._resetFunction then
 		self._resetFunction(obj)
 	end
-
 	obj.Parent = nil
+	
+	if self._inactiveCount >= self._maxSize then
+		local oldestObj = self._inactiveObjects[self._first]
+		oldestObj:Destroy()
+		self._inactiveObjects[self._first] = nil
+		self._first = (self._first % self._maxSize) + 1
+	else
+		self._inactiveCount += 1
+	end
+
+	self._last = (self._last % self._maxSize) + 1
+	self._inactiveObjects[self._last] = obj
 end
 
 function ObjectPool:GetBatch(count: number)
@@ -107,13 +133,7 @@ function ObjectPool:ReturnBatch(objectsTable: {Instance})
 end
 
 function ObjectPool:GetStats()
-	local activeCount = 0
-	for _ in pairs(self._activeObjects) do
-		activeCount += 1
-	end
-	
-	local inactiveCount = #self._inactiveObjects
-	local totalCount = activeCount + inactiveCount
+	local totalCount = self._activeCount + self._inactiveCount
 	
 	local hitRate = 0
 	if self._stats.totalGets > 0 then
@@ -131,8 +151,8 @@ function ObjectPool:GetStats()
 	end
 
 	return {
-		ActiveCount = activeCount,
-		InactiveCount = inactiveCount,
+		ActiveCount = self._activeCount,
+		InactiveCount = self._inactiveCount,
 		TotalCount = totalCount,
 		MaxSize = self._maxSize,
 		HitRate = hitRate,
@@ -142,10 +162,16 @@ function ObjectPool:GetStats()
 end
 
 function ObjectPool:ClearInactive()
-	for _, obj in ipairs(self._inactiveObjects) do
-		obj:Destroy()
+	for i = 1, self._maxSize do
+		local obj = self._inactiveObjects[i]
+		if obj then
+			obj:Destroy()
+		end
 	end
-	self._inactiveObjects = {}
+	self._inactiveObjects = table.create(self._maxSize)
+	self._inactiveCount = 0
+	self._first = 1
+	self._last = 0
 end
 
 function ObjectPool:Destroy()
@@ -154,6 +180,7 @@ function ObjectPool:Destroy()
 		obj:Destroy()
 	end
 	self._activeObjects = {}
+	self._activeCount = 0
 end
 
 return table.freeze(ObjectPool)
