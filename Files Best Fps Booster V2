@@ -2,186 +2,182 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/AMOGUS392/Fps-Booster
 local ObjectPool = {}
 ObjectPool.__index = ObjectPool
 
-local function createPool(template: Instance, initialSize: number, maxSize: number, resetFunction: ((obj: Instance) -> ())?)
-	assert(typeof(template) == "Instance", "Template must be an Instance")
-	assert(typeof(initialSize) == "number" and initialSize >= 0, "initialSize must be a non-negative number")
-	assert(typeof(maxSize) == "number" and maxSize > 0 and maxSize >= initialSize, "maxSize must be a positive number greater than or equal to initialSize")
-
-	local pool = setmetatable({}, ObjectPool)
-
-	pool._template = template
-	pool._maxSize = maxSize
-	pool._resetFunction = resetFunction
-	
-	pool._inactiveObjects = table.create(maxSize)
-	pool._activeObjects = {}
-
-	pool._activeCount = 0
-	pool._inactiveCount = 0
-	pool._first = 1
-	pool._last = 0
-
-	pool._stats = {
-		totalGets = 0,
-		totalReturns = 0,
-		cacheHits = 0,
-		newCreations = 0,
-	}
-
-	return pool
+function ObjectPool.new(template, initialSize, maxSize, resetFunction)
+    assert(template, "Template cannot be nil")
+    assert(maxSize > 0, "MaxSize must be greater than 0")
+    
+    local self = setmetatable({}, ObjectPool)
+    
+    self.template = template
+    self.maxSize = maxSize
+    self.resetFunction = resetFunction
+    
+    self.available = {}
+    self.activeObjects = {}
+    self.activeCount = 0
+    self.isInitializing = false
+    
+    self.stats = {
+        totalGets = 0,
+        totalReturns = 0,
+        cacheHits = 0,
+        newCreations = 0,
+        resetErrors = 0,
+    }
+    
+    initialSize = math.clamp(initialSize, 0, maxSize)
+    
+    for i = 1, initialSize do
+        local obj = template:Clone()
+        obj.Parent = nil
+        table.insert(self.available, obj)
+    end
+    
+    return self
 end
 
-function ObjectPool.new(template: Instance, initialSize: number, maxSize: number, resetFunction: ((obj: Instance) -> ())?)
-	local pool = createPool(template, initialSize, maxSize, resetFunction)
-
-	for i = 1, initialSize do
-		local newObj = template:Clone()
-		newObj.Parent = nil
-		pool._last = (pool._last % pool._maxSize) + 1
-		pool._inactiveObjects[pool._last] = newObj
-		pool._inactiveCount += 1
-	end
-
-	return pool
-end
-
-function ObjectPool.newAsync(template: Instance, initialSize: number, maxSize: number, resetFunction: ((obj: Instance) -> ())?)
-	local pool = createPool(template, initialSize, maxSize, resetFunction)
-
-	task.spawn(function()
-		for i = 1, initialSize do
-			local newObj = template:Clone()
-			newObj.Parent = nil
-			pool._last = (pool._last % pool._maxSize) + 1
-			pool._inactiveObjects[pool._last] = newObj
-			pool._inactiveCount += 1
-			task.wait()
-		end
-	end)
-
-	return pool
+function ObjectPool.newAsync(template, initialSize, maxSize, resetFunction)
+    local self = ObjectPool.new(template, 0, maxSize, resetFunction)
+    
+    initialSize = math.clamp(initialSize, 0, maxSize)
+    self.isInitializing = true
+    
+    task.spawn(function()
+        for i = 1, initialSize do
+            if self.activeCount + #self.available >= self.maxSize then
+                break
+            end
+            
+            local obj = template:Clone()
+            obj.Parent = nil
+            table.insert(self.available, obj)
+            task.wait()
+        end
+        self.isInitializing = false
+    end)
+    
+    return self
 end
 
 function ObjectPool:Get()
-	self._stats.totalGets += 1
-	local obj
-
-	if self._inactiveCount > 0 then
-		self._stats.cacheHits += 1
-		obj = self._inactiveObjects[self._first]
-		self._inactiveObjects[self._first] = nil
-		self._first = (self._first % self._maxSize) + 1
-		self._inactiveCount -= 1
-	elseif self._activeCount < self._maxSize then
-		self._stats.newCreations += 1
-		obj = self._template:Clone()
-		obj.Parent = nil
-	else
-		warn("[ObjectPool] Пул для '"..self._template.Name.."' достиг максимального размера (" .. tostring(self._maxSize) .. "). Не удалось получить объект.")
-		return nil
-	end
-	
-	self._activeObjects[obj] = true
-	self._activeCount += 1
-	return obj
+    self.stats.totalGets += 1
+    local obj
+    
+    if #self.available > 0 then
+        self.stats.cacheHits += 1
+        obj = table.remove(self.available)
+    elseif self.activeCount < self.maxSize then
+        self.stats.newCreations += 1
+        obj = self.template:Clone()
+        obj.Parent = nil
+    else
+        warn("[ObjectPool] Pool for '" .. self.template.Name .. "' has reached maximum size (" .. self.maxSize .. "). Failed to get object.")
+        return nil
+    end
+    
+    self.activeObjects[obj] = true
+    self.activeCount += 1
+    
+    return obj
 end
 
-function ObjectPool:Return(obj: Instance)
-	if not self._activeObjects[obj] then
-		warn("[ObjectPool] Попытка вернуть в пул объект, который не принадлежит этому пулу или уже возвращен.", obj)
-		return
-	end
-
-	self._stats.totalReturns += 1
-	self._activeObjects[obj] = nil
-	self._activeCount -= 1
-
-	if self._resetFunction then
-		self._resetFunction(obj)
-	end
-	obj.Parent = nil
-	
-	if self._inactiveCount >= self._maxSize then
-		local oldestObj = self._inactiveObjects[self._first]
-		oldestObj:Destroy()
-		self._inactiveObjects[self._first] = nil
-		self._first = (self._first % self._maxSize) + 1
-	else
-		self._inactiveCount += 1
-	end
-
-	self._last = (self._last % self._maxSize) + 1
-	self._inactiveObjects[self._last] = obj
+function ObjectPool:Return(obj)
+    if not obj or not self.activeObjects[obj] then
+        return
+    end
+    
+    self.activeObjects[obj] = nil
+    self.activeCount -= 1
+    
+    local resetSuccess = true
+    if self.resetFunction then
+        local success, err = pcall(self.resetFunction, obj)
+        if not success then
+            warn("[ObjectPool] Reset function failed:", err)
+            self.stats.resetErrors += 1
+            resetSuccess = false
+        end
+    end
+    
+    obj.Parent = nil
+    
+    if resetSuccess then
+        self.stats.totalReturns += 1
+        table.insert(self.available, obj)
+    else
+        obj:Destroy()
+    end
 end
 
-function ObjectPool:GetBatch(count: number)
-	local batch = {}
-	for i = 1, count do
-		local obj = self:Get()
-		if obj then
-			table.insert(batch, obj)
-		else
-			break
-		end
-	end
-	return batch
+function ObjectPool:GetBatch(count)
+    local batch = table.create(count)
+    local actualCount = 0
+    
+    for i = 1, count do
+        local obj = self:Get()
+        if obj then
+            actualCount += 1
+            batch[actualCount] = obj
+        else
+            break
+        end
+    end
+    
+    return batch, actualCount
 end
 
-function ObjectPool:ReturnBatch(objectsTable: {Instance})
-	for _, obj in ipairs(objectsTable) do
-		self:Return(obj)
-	end
+function ObjectPool:ReturnBatch(objectsTable)
+    for _, obj in ipairs(objectsTable) do
+        self:Return(obj)
+    end
 end
 
 function ObjectPool:GetStats()
-	local totalCount = self._activeCount + self._inactiveCount
-	
-	local hitRate = 0
-	if self._stats.totalGets > 0 then
-		hitRate = self._stats.cacheHits / self._stats.totalGets
-	end
-	
-	local pressureRatio = totalCount / self._maxSize
-	local memoryPressure = "low"
-	if pressureRatio >= 0.95 then
-		memoryPressure = "critical"
-	elseif pressureRatio >= 0.75 then
-		memoryPressure = "high"
-	elseif pressureRatio >= 0.5 then
-		memoryPressure = "moderate"
-	end
-
-	return {
-		ActiveCount = self._activeCount,
-		InactiveCount = self._inactiveCount,
-		TotalCount = totalCount,
-		MaxSize = self._maxSize,
-		HitRate = hitRate,
-		MemoryPressure = memoryPressure,
-		RawStats = self._stats,
-	}
+    local hitRate = 0
+    if self.stats.totalGets > 0 then
+        hitRate = self.stats.cacheHits / self.stats.totalGets
+    end
+    
+    local totalCount = self.activeCount + #self.available
+    local pressureRatio = self.activeCount / self.maxSize
+    
+    local memoryPressure = "low"
+    if pressureRatio >= 0.95 then
+        memoryPressure = "critical"
+    elseif pressureRatio >= 0.75 then
+        memoryPressure = "high"
+    elseif pressureRatio >= 0.5 then
+        memoryPressure = "moderate"
+    end
+    
+    return {
+        ActiveCount = self.activeCount,
+        InactiveCount = #self.available,
+        TotalCount = totalCount,
+        MaxSize = self.maxSize,
+        HitRate = hitRate,
+        MemoryPressure = memoryPressure,
+        IsInitializing = self.isInitializing,
+        RawStats = self.stats,
+    }
 end
 
 function ObjectPool:ClearInactive()
-	for i = 1, self._maxSize do
-		local obj = self._inactiveObjects[i]
-		if obj then
-			obj:Destroy()
-		end
-	end
-	self._inactiveObjects = table.create(self._maxSize)
-	self._inactiveCount = 0
-	self._first = 1
-	self._last = 0
+    for _, obj in ipairs(self.available) do
+        obj:Destroy()
+    end
+    table.clear(self.available)
 end
 
 function ObjectPool:Destroy()
-	self:ClearInactive()
-	for obj in pairs(self._activeObjects) do
-		obj:Destroy()
-	end
-	self._activeObjects = {}
-	self._activeCount = 0
+    self:ClearInactive()
+    
+    for obj in pairs(self.activeObjects) do
+        obj:Destroy()
+    end
+    
+    table.clear(self.activeObjects)
+    self.activeCount = 0
 end
 
 return table.freeze(ObjectPool)
