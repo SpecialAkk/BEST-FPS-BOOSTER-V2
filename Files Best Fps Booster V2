@@ -1,4 +1,4 @@
-loadstring(game:HttpGet("https://raw.githubusercontent.com/AMOGUS392/Fps-Booster-Actor/refs/heads/main/Fps%20Booster%20Actor", true))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/AMOGUS392/Fps-Booster-V2/refs/heads/main/OMS.lua", true))()
 local cloneMethod = game.Clone
 local destroyMethod = game.Destroy
 local isAMethod = game.IsA
