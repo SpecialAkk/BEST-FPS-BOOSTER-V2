@@ -1,21 +1,17 @@
 loadstring(game:HttpGet("https://raw.githubusercontent.com/AMOGUS392/Fps-Booster-V2/refs/heads/main/OMS.lua", true))()
-local cloneMethod = game.Clone
-local destroyMethod = game.Destroy
-local isAMethod = game.IsA
-
 local ObjectPool = {}
 ObjectPool.__index = ObjectPool
 
 local function safeClone(template)
     local success, result = pcall(function()
-        return cloneMethod(template)
+        return template:Clone()
     end)
     return success and result or nil
 end
 
 local function safeDestroy(obj)
     pcall(function()
-        destroyMethod(obj)
+        obj:Destroy()
     end)
 end
 
@@ -23,10 +19,70 @@ local function isValidObject(obj)
     if not obj then return false end
     
     local success = pcall(function()
-        return obj.Parent ~= nil or obj:IsDescendantOf(game)
+        local _ = obj.ClassName
     end)
     
     return success
+end
+
+local function resetParticleEmitter(emitter)
+    pcall(function()
+        emitter.Enabled = false
+        
+        if emitter.Clear then
+            emitter:Clear()
+        end
+    end)
+end
+
+local function resetBeam(beam)
+    pcall(function()
+        beam.Enabled = false
+        
+        if beam.Clear then
+            beam:Clear()
+        end
+        
+        beam.Attachment0 = nil
+        beam.Attachment1 = nil
+    end)
+end
+
+local function resetTrail(trail)
+    pcall(function()
+        trail.Enabled = false
+        
+        if trail.Clear then
+            trail:Clear()
+        end
+        
+        trail.Attachment0 = nil
+        trail.Attachment1 = nil
+    end)
+end
+
+local function resetLegacyEffect(effect)
+    pcall(function()
+        effect.Enabled = false
+    end)
+end
+
+local function resetAllEffects(obj)
+    pcall(function()
+        for _, child in ipairs(obj:GetDescendants()) do
+            local className = child.ClassName
+            
+            if className == "ParticleEmitter" then
+                resetParticleEmitter(child)
+            elseif className == "Beam" then
+                resetBeam(child)
+            elseif className == "Trail" then
+                resetTrail(child)
+            elseif className == "Fire" or className == "Smoke" or className == "Sparkles" then
+                resetLegacyEffect(child)
+            end
+        end
+    end)
 end
 
 function ObjectPool.new(template, initialSize, maxSize, resetFunction)
@@ -62,6 +118,7 @@ function ObjectPool.new(template, initialSize, maxSize, resetFunction)
         local obj = safeClone(template)
         if obj then
             obj.Parent = nil
+            resetAllEffects(obj)
             table.insert(self.available, obj)
         end
     end
@@ -89,6 +146,7 @@ function ObjectPool.newAsync(template, initialSize, maxSize, resetFunction, yiel
             local obj = safeClone(template)
             if obj then
                 obj.Parent = nil
+                resetAllEffects(obj)
                 table.insert(self.available, obj)
             end
             
@@ -116,16 +174,19 @@ function ObjectPool:Get()
     self.stats.totalGets += 1
     local obj
     
-    if #self.available > 0 then
+    while #self.available > 0 do
         obj = table.remove(self.available)
         
-        if not isValidObject(obj) then
+        if isValidObject(obj) then
+            self.stats.cacheHits += 1
+            break
+        else
             safeDestroy(obj)
-            return self:Get()
+            obj = nil
         end
-        
-        self.stats.cacheHits += 1
-    elseif self.activeCount < self.maxSize then
+    end
+    
+    if not obj and self.activeCount < self.maxSize then
         obj = safeClone(self.template)
         
         if not obj then
@@ -134,7 +195,9 @@ function ObjectPool:Get()
         
         obj.Parent = nil
         self.stats.newCreations += 1
-    else
+    end
+    
+    if not obj then
         return nil
     end
     
@@ -162,6 +225,8 @@ function ObjectPool:Return(obj)
     
     self.activeObjects[obj] = nil
     self.activeCount -= 1
+    
+    resetAllEffects(obj)
     
     local resetSuccess = true
     if self.resetFunction then
