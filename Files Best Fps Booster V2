@@ -2,95 +2,73 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/AMOGUS392/Fps-Booster
 local ObjectPool = {}
 ObjectPool.__index = ObjectPool
 
-local function safeClone(template)
-    local success, result = pcall(function()
-        return template:Clone()
-    end)
-    return success and result or nil
-end
-
-local function safeDestroy(obj)
-    pcall(function()
-        obj:Destroy()
-    end)
-end
-
-local function isValidObject(obj)
-    if not obj then return false end
-    
-    local success = pcall(function()
-        local _ = obj.ClassName
-    end)
-    
-    return success
-end
-
 local function resetParticleEmitter(emitter)
-    pcall(function()
-        emitter.Enabled = false
-        
-        if emitter.Clear then
-            emitter:Clear()
-        end
-    end)
+    emitter.Enabled = false
+    emitter:Clear()
 end
 
 local function resetBeam(beam)
-    pcall(function()
-        beam.Enabled = false
-        
-        if beam.Clear then
-            beam:Clear()
-        end
-        
-        beam.Attachment0 = nil
-        beam.Attachment1 = nil
-    end)
+    beam.Enabled = false
+    beam:Clear()
+    beam.Attachment0 = nil
+    beam.Attachment1 = nil
 end
 
 local function resetTrail(trail)
-    pcall(function()
-        trail.Enabled = false
-        
-        if trail.Clear then
-            trail:Clear()
-        end
-        
-        trail.Attachment0 = nil
-        trail.Attachment1 = nil
-    end)
+    trail.Enabled = false
+    trail:Clear()
+    trail.Attachment0 = nil
+    trail.Attachment1 = nil
 end
 
 local function resetLegacyEffect(effect)
-    pcall(function()
-        effect.Enabled = false
-    end)
+    effect.Enabled = false
 end
 
-local function resetAllEffects(obj)
-    pcall(function()
-        for _, child in ipairs(obj:GetDescendants()) do
-            local className = child.ClassName
-            
-            if className == "ParticleEmitter" then
-                resetParticleEmitter(child)
-            elseif className == "Beam" then
-                resetBeam(child)
-            elseif className == "Trail" then
-                resetTrail(child)
-            elseif className == "Fire" or className == "Smoke" or className == "Sparkles" then
-                resetLegacyEffect(child)
-            end
+local effect_resetters = {
+    ParticleEmitter = resetParticleEmitter,
+    Beam = resetBeam,
+    Trail = resetTrail,
+    Fire = resetLegacyEffect,
+    Smoke = resetLegacyEffect,
+    Sparkles = resetLegacyEffect
+}
+
+local function scanEffects(obj)
+    local effects = {}
+    local count = 0
+    local descendants = obj:GetDescendants()
+    
+    for i = 1, #descendants do
+        local desc = descendants[i]
+        local resetter = effect_resetters[desc.ClassName]
+        if resetter then
+            count = count + 1
+            effects[count] = {effect = desc, reset = resetter}
         end
-    end)
+    end
+    
+    return count > 0 and effects or nil
+end
+
+local function resetEffects(effects)
+    if not effects then return end
+    for i = 1, #effects do
+        local data = effects[i]
+        if data.effect.Parent then
+            data.reset(data.effect)
+        end
+    end
 end
 
 function ObjectPool.new(template, initialSize, maxSize, resetFunction)
-    if not template or not pcall(function() return template.ClassName end) then
-        return nil
-    end
+    if not template then return nil end
+    
+    local success, className = pcall(function() return template.ClassName end)
+    if not success then return nil end
     
     maxSize = maxSize and maxSize > 0 and maxSize or 100
+    initialSize = math.clamp(initialSize or 0, 0, maxSize)
     
     local self = setmetatable({}, ObjectPool)
     
@@ -98,10 +76,11 @@ function ObjectPool.new(template, initialSize, maxSize, resetFunction)
     self.maxSize = maxSize
     self.resetFunction = resetFunction
     
-    self.available = {}
+    self.available = table.create(maxSize)
+    self.availableCount = 0
     self.activeObjects = {}
     self.activeCount = 0
-    self.isInitializing = false
+    self.effectCache = {}
     self._destroyed = false
     
     self.stats = {
@@ -109,17 +88,20 @@ function ObjectPool.new(template, initialSize, maxSize, resetFunction)
         totalReturns = 0,
         cacheHits = 0,
         newCreations = 0,
-        resetErrors = 0,
+        resetErrors = 0
     }
     
-    initialSize = math.clamp(initialSize or 0, 0, maxSize)
-    
     for i = 1, initialSize do
-        local obj = safeClone(template)
-        if obj then
+        local success, obj = pcall(template.Clone, template)
+        if success and obj then
             obj.Parent = nil
-            resetAllEffects(obj)
-            table.insert(self.available, obj)
+            local effects = scanEffects(obj)
+            if effects then
+                resetEffects(effects)
+                self.effectCache[obj] = effects
+            end
+            self.availableCount = self.availableCount + 1
+            self.available[self.availableCount] = obj
         end
     end
     
@@ -131,23 +113,22 @@ function ObjectPool.newAsync(template, initialSize, maxSize, resetFunction, yiel
     if not self then return nil end
     
     initialSize = math.clamp(initialSize or 0, 0, maxSize)
-    self.isInitializing = true
     
     task.spawn(function()
         for i = 1, initialSize do
-            if self._destroyed then
-                break
-            end
+            if self._destroyed then break end
+            if self.activeCount + self.availableCount >= self.maxSize then break end
             
-            if self.activeCount + #self.available >= self.maxSize then
-                break
-            end
-            
-            local obj = safeClone(template)
-            if obj then
+            local success, obj = pcall(template.Clone, template)
+            if success and obj then
                 obj.Parent = nil
-                resetAllEffects(obj)
-                table.insert(self.available, obj)
+                local effects = scanEffects(obj)
+                if effects then
+                    resetEffects(effects)
+                    self.effectCache[obj] = effects
+                end
+                self.availableCount = self.availableCount + 1
+                self.available[self.availableCount] = obj
             end
             
             if yieldInterval then
@@ -156,101 +137,105 @@ function ObjectPool.newAsync(template, initialSize, maxSize, resetFunction, yiel
                 task.wait()
             end
         end
-        self.isInitializing = false
     end)
     
     return self
 end
 
-function ObjectPool:_checkDestroyed()
-    return self._destroyed
-end
-
 function ObjectPool:Get()
-    if self:_checkDestroyed() then
-        return nil
-    end
+    if self._destroyed then return nil end
     
-    self.stats.totalGets += 1
+    self.stats.totalGets = self.stats.totalGets + 1
     local obj
     
-    while #self.available > 0 do
-        obj = table.remove(self.available)
+    while self.availableCount > 0 do
+        obj = self.available[self.availableCount]
+        self.available[self.availableCount] = nil
+        self.availableCount = self.availableCount - 1
         
-        if isValidObject(obj) then
-            self.stats.cacheHits += 1
+        local success = pcall(function() return obj.ClassName end)
+        if success then
+            self.stats.cacheHits = self.stats.cacheHits + 1
             break
         else
-            safeDestroy(obj)
+            if obj then
+                pcall(obj.Destroy, obj)
+            end
             obj = nil
         end
     end
     
     if not obj and self.activeCount < self.maxSize then
-        obj = safeClone(self.template)
-        
-        if not obj then
-            return nil
+        local success, result = pcall(self.template.Clone, self.template)
+        if success and result then
+            obj = result
+            obj.Parent = nil
+            self.stats.newCreations = self.stats.newCreations + 1
+            
+            local effects = scanEffects(obj)
+            if effects then
+                self.effectCache[obj] = effects
+            end
         end
-        
-        obj.Parent = nil
-        self.stats.newCreations += 1
     end
     
-    if not obj then
-        return nil
-    end
+    if not obj then return nil end
     
     self.activeObjects[obj] = true
-    self.activeCount += 1
+    self.activeCount = self.activeCount + 1
     
     return obj
 end
 
 function ObjectPool:Return(obj)
-    if self:_checkDestroyed() then
-        return
-    end
+    if self._destroyed or not obj or not self.activeObjects[obj] then return end
     
-    if not obj or not self.activeObjects[obj] then
-        return
-    end
-    
-    if not isValidObject(obj) then
-        self.activeObjects[obj] = nil
-        self.activeCount -= 1
-        safeDestroy(obj)
-        return
-    end
+    local success = pcall(function() return obj.ClassName end)
     
     self.activeObjects[obj] = nil
-    self.activeCount -= 1
+    self.activeCount = self.activeCount - 1
     
-    resetAllEffects(obj)
+    if not success then
+        pcall(obj.Destroy, obj)
+        self.effectCache[obj] = nil
+        return
+    end
+    
+    local effects = self.effectCache[obj]
+    if not effects then
+        effects = scanEffects(obj)
+        if effects then
+            self.effectCache[obj] = effects
+        end
+    end
+    
+    if effects then
+        resetEffects(effects)
+    end
     
     local resetSuccess = true
     if self.resetFunction then
         local success = pcall(self.resetFunction, obj)
         if not success then
-            self.stats.resetErrors += 1
+            self.stats.resetErrors = self.stats.resetErrors + 1
             resetSuccess = false
         end
     end
     
     obj.Parent = nil
     
-    if resetSuccess then
-        self.stats.totalReturns += 1
-        table.insert(self.available, obj)
+    if resetSuccess and self.availableCount < self.maxSize then
+        self.stats.totalReturns = self.stats.totalReturns + 1
+        self.availableCount = self.availableCount + 1
+        self.available[self.availableCount] = obj
     else
-        safeDestroy(obj)
+        pcall(obj.Destroy, obj)
+        self.effectCache[obj] = nil
     end
 end
 
 function ObjectPool:GetBatch(count)
-    if self:_checkDestroyed() then
-        return {}, 0
-    end
+    if self._destroyed then return {}, 0 end
     
     local batch = table.create(count)
     local actualCount = 0
@@ -258,7 +243,7 @@ function ObjectPool:GetBatch(count)
     for i = 1, count do
         local obj = self:Get()
         if obj then
-            actualCount += 1
+            actualCount = actualCount + 1
             batch[actualCount] = obj
         else
             break
@@ -269,77 +254,76 @@ function ObjectPool:GetBatch(count)
 end
 
 function ObjectPool:ReturnBatch(objectsTable)
-    if self:_checkDestroyed() then
-        return
-    end
+    if self._destroyed then return end
     
-    for _, obj in ipairs(objectsTable) do
-        self:Return(obj)
+    for i = 1, #objectsTable do
+        self:Return(objectsTable[i])
     end
 end
 
 function ObjectPool:GetStats()
-    if self:_checkDestroyed() then
-        return nil
-    end
+    if self._destroyed then return nil end
     
-    local hitRate = 0
-    if self.stats.totalGets > 0 then
-        hitRate = self.stats.cacheHits / self.stats.totalGets
-    end
-    
-    local totalCount = self.activeCount + #self.available
+    local hitRate = self.stats.totalGets > 0 and (self.stats.cacheHits / self.stats.totalGets) or 0
+    local totalCount = self.activeCount + self.availableCount
     local pressureRatio = self.activeCount / self.maxSize
     
-    local memoryPressure = "low"
+    local memoryPressure
     if pressureRatio >= 0.95 then
         memoryPressure = "critical"
     elseif pressureRatio >= 0.75 then
         memoryPressure = "high"
     elseif pressureRatio >= 0.5 then
         memoryPressure = "moderate"
+    else
+        memoryPressure = "low"
     end
     
     return {
         ActiveCount = self.activeCount,
-        InactiveCount = #self.available,
+        InactiveCount = self.availableCount,
         TotalCount = totalCount,
         MaxSize = self.maxSize,
         HitRate = hitRate,
         MemoryPressure = memoryPressure,
-        IsInitializing = self.isInitializing,
-        RawStats = self.stats,
+        RawStats = self.stats
     }
 end
 
 function ObjectPool:ClearInactive()
-    if self:_checkDestroyed() then
-        return
+    if self._destroyed then return end
+    
+    for i = 1, self.availableCount do
+        local obj = self.available[i]
+        if obj then
+            pcall(obj.Destroy, obj)
+            self.effectCache[obj] = nil
+        end
     end
     
-    for _, obj in ipairs(self.available) do
-        safeDestroy(obj)
-    end
     table.clear(self.available)
+    self.availableCount = 0
 end
 
 function ObjectPool:Destroy()
-    if self._destroyed then
-        return
-    end
-    
+    if self._destroyed then return end
     self._destroyed = true
     
-    for _, obj in ipairs(self.available) do
-        safeDestroy(obj)
+    for i = 1, self.availableCount do
+        local obj = self.available[i]
+        if obj then
+            pcall(obj.Destroy, obj)
+        end
     end
-    table.clear(self.available)
     
     for obj in pairs(self.activeObjects) do
-        safeDestroy(obj)
+        pcall(obj.Destroy, obj)
     end
     
+    table.clear(self.available)
     table.clear(self.activeObjects)
+    table.clear(self.effectCache)
+    self.availableCount = 0
     self.activeCount = 0
 end
 
