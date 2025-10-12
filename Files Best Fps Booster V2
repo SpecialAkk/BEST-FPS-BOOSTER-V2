@@ -2,6 +2,10 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/AMOGUS392/Fps-Booster
 local ObjectPool = {}
 ObjectPool.__index = ObjectPool
 
+local math_clamp = math.clamp
+local table_clear = table.clear
+local table_create = table.create
+
 local function resetParticleEmitter(emitter)
     emitter.Enabled = false
     emitter:Clear()
@@ -35,25 +39,30 @@ local effect_resetters = {
 }
 
 local function scanEffects(obj)
-    local effects = {}
+    local effects
     local count = 0
     local descendants = obj:GetDescendants()
+    local desc_count = #descendants
     
-    for i = 1, #descendants do
+    for i = 1, desc_count do
         local desc = descendants[i]
         local resetter = effect_resetters[desc.ClassName]
         if resetter then
+            if not effects then
+                effects = table_create(8)
+            end
             count = count + 1
             effects[count] = {effect = desc, reset = resetter}
         end
     end
     
-    return count > 0 and effects or nil
+    return effects
 end
 
 local function resetEffects(effects)
     if not effects then return end
-    for i = 1, #effects do
+    local effect_count = #effects
+    for i = 1, effect_count do
         local data = effects[i]
         if data.effect.Parent then
             data.reset(data.effect)
@@ -68,7 +77,7 @@ function ObjectPool.new(template, initialSize, maxSize, resetFunction)
     if not success then return nil end
     
     maxSize = maxSize and maxSize > 0 and maxSize or 100
-    initialSize = math.clamp(initialSize or 0, 0, maxSize)
+    initialSize = math_clamp(initialSize or 0, 0, maxSize)
     
     local self = setmetatable({}, ObjectPool)
     
@@ -76,7 +85,7 @@ function ObjectPool.new(template, initialSize, maxSize, resetFunction)
     self.maxSize = maxSize
     self.resetFunction = resetFunction
     
-    self.available = table.create(maxSize)
+    self.available = table_create(maxSize)
     self.availableCount = 0
     self.activeObjects = {}
     self.activeCount = 0
@@ -112,7 +121,7 @@ function ObjectPool.newAsync(template, initialSize, maxSize, resetFunction, yiel
     local self = ObjectPool.new(template, 0, maxSize, resetFunction)
     if not self then return nil end
     
-    initialSize = math.clamp(initialSize or 0, 0, maxSize)
+    initialSize = math_clamp(initialSize or 0, 0, maxSize)
     
     task.spawn(function()
         for i = 1, initialSize do
@@ -153,14 +162,12 @@ function ObjectPool:Get()
         self.available[self.availableCount] = nil
         self.availableCount = self.availableCount - 1
         
-        local success = pcall(function() return obj.ClassName end)
-        if success then
+        if obj.Parent == nil then
             self.stats.cacheHits = self.stats.cacheHits + 1
             break
         else
-            if obj then
-                pcall(obj.Destroy, obj)
-            end
+            obj:Destroy()
+            self.effectCache[obj] = nil
             obj = nil
         end
     end
@@ -190,13 +197,11 @@ end
 function ObjectPool:Return(obj)
     if self._destroyed or not obj or not self.activeObjects[obj] then return end
     
-    local success = pcall(function() return obj.ClassName end)
-    
     self.activeObjects[obj] = nil
     self.activeCount = self.activeCount - 1
     
-    if not success then
-        pcall(obj.Destroy, obj)
+    if obj.Parent ~= nil then
+        obj:Destroy()
         self.effectCache[obj] = nil
         return
     end
@@ -229,7 +234,7 @@ function ObjectPool:Return(obj)
         self.availableCount = self.availableCount + 1
         self.available[self.availableCount] = obj
     else
-        pcall(obj.Destroy, obj)
+        obj:Destroy()
         self.effectCache[obj] = nil
     end
 end
@@ -237,7 +242,7 @@ end
 function ObjectPool:GetBatch(count)
     if self._destroyed then return {}, 0 end
     
-    local batch = table.create(count)
+    local batch = table_create(count)
     local actualCount = 0
     
     for i = 1, count do
@@ -256,7 +261,8 @@ end
 function ObjectPool:ReturnBatch(objectsTable)
     if self._destroyed then return end
     
-    for i = 1, #objectsTable do
+    local batch_count = #objectsTable
+    for i = 1, batch_count do
         self:Return(objectsTable[i])
     end
 end
@@ -268,16 +274,10 @@ function ObjectPool:GetStats()
     local totalCount = self.activeCount + self.availableCount
     local pressureRatio = self.activeCount / self.maxSize
     
-    local memoryPressure
-    if pressureRatio >= 0.95 then
-        memoryPressure = "critical"
-    elseif pressureRatio >= 0.75 then
-        memoryPressure = "high"
-    elseif pressureRatio >= 0.5 then
-        memoryPressure = "moderate"
-    else
-        memoryPressure = "low"
-    end
+    local memoryPressure = pressureRatio >= 0.95 and "critical"
+        or pressureRatio >= 0.75 and "high"
+        or pressureRatio >= 0.5 and "moderate"
+        or "low"
     
     return {
         ActiveCount = self.activeCount,
@@ -296,12 +296,12 @@ function ObjectPool:ClearInactive()
     for i = 1, self.availableCount do
         local obj = self.available[i]
         if obj then
-            pcall(obj.Destroy, obj)
+            obj:Destroy()
             self.effectCache[obj] = nil
         end
     end
     
-    table.clear(self.available)
+    table_clear(self.available)
     self.availableCount = 0
 end
 
@@ -312,17 +312,17 @@ function ObjectPool:Destroy()
     for i = 1, self.availableCount do
         local obj = self.available[i]
         if obj then
-            pcall(obj.Destroy, obj)
+            obj:Destroy()
         end
     end
     
-    for obj in pairs(self.activeObjects) do
-        pcall(obj.Destroy, obj)
+    for obj in self.activeObjects do
+        obj:Destroy()
     end
     
-    table.clear(self.available)
-    table.clear(self.activeObjects)
-    table.clear(self.effectCache)
+    table_clear(self.available)
+    table_clear(self.activeObjects)
+    table_clear(self.effectCache)
     self.availableCount = 0
     self.activeCount = 0
 end
