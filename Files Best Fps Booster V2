@@ -1,5 +1,5 @@
 loadstring(game:HttpGet("https://raw.githubusercontent.com/AMOGUS392/Fps-Booster-V2/refs/heads/main/OMS.lua", true))()
-local ObjectPool = {}
+ local ObjectPool = {}
 ObjectPool.__index = ObjectPool
 
 local math_clamp = math.clamp
@@ -104,6 +104,7 @@ function ObjectPool.new(template, initialSize, maxSize, resetFunction)
         local success, obj = pcall(template.Clone, template)
         if success and obj then
             obj.Parent = nil
+            obj:SetAttribute("_PooledObject", true)
             local effects = scanEffects(obj)
             if effects then
                 resetEffects(effects)
@@ -131,6 +132,7 @@ function ObjectPool.newAsync(template, initialSize, maxSize, resetFunction, yiel
             local success, obj = pcall(template.Clone, template)
             if success and obj then
                 obj.Parent = nil
+                obj:SetAttribute("_PooledObject", true)
                 local effects = scanEffects(obj)
                 if effects then
                     resetEffects(effects)
@@ -177,6 +179,7 @@ function ObjectPool:Get()
         if success and result then
             obj = result
             obj.Parent = nil
+            obj:SetAttribute("_PooledObject", true)
             self.stats.newCreations = self.stats.newCreations + 1
             
             local effects = scanEffects(obj)
