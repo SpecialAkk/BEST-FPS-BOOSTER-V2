@@ -2,10 +2,6 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/AMOGUS392/Fps-Booster
 local ObjectPool = {}
 ObjectPool.__index = ObjectPool
 
-local tableClear = table.clear
-local tableCreate = table.create
-local mathClamp = math.clamp
-
 local function isValidObject(obj: Instance?): boolean
 	if not obj then
 		return false
@@ -24,7 +20,7 @@ function ObjectPool.new(template: Instance, initialSize: number, maxSize: number
 	self.maxSize = maxSize
 	self.resetFunction = resetFunction
 	
-	self.available = tableCreate(maxSize)
+	self.available = table.create(maxSize)
 	self.activeObjects = {}
 	self.activeCount = 0
 	self.availableCount = 0
@@ -40,7 +36,7 @@ function ObjectPool.new(template: Instance, initialSize: number, maxSize: number
 		duplicateReturns = 0,
 	}
 	
-	initialSize = mathClamp(initialSize, 0, maxSize)
+	initialSize = math.clamp(initialSize, 0, maxSize)
 	
 	for i = 1, initialSize do
 		local obj = template:Clone()
@@ -55,7 +51,7 @@ end
 function ObjectPool.newAsync(template: Instance, initialSize: number, maxSize: number, resetFunction: ((Instance) -> ())?): typeof(setmetatable({} :: any, ObjectPool))
 	local self = ObjectPool.new(template, 0, maxSize, resetFunction)
 	
-	initialSize = mathClamp(initialSize, 0, maxSize)
+	initialSize = math.clamp(initialSize, 0, maxSize)
 	self.isInitializing = true
 	
 	task.spawn(function()
@@ -173,7 +169,7 @@ end
 function ObjectPool:GetBatch(count: number): ({Instance}, number)
 	assert(count > 0, "Count must be greater than 0")
 	
-	local batch = tableCreate(count)
+	local batch = table.create(count)
 	local actualCount = 0
 	
 	for i = 1, count do
@@ -238,7 +234,7 @@ function ObjectPool:ClearInactive(): ()
 			obj:Destroy()
 		end
 	end
-	tableClear(self.available)
+	table.clear(self.available)
 	self.availableCount = 0
 end
 
@@ -257,10 +253,10 @@ function ObjectPool:Destroy(): ()
 		end
 	end
 	
-	tableClear(self.activeObjects)
+	table.clear(self.activeObjects)
 	self.activeCount = 0
 	
-	tableClear(self.stats)
+	table.clear(self.stats)
 	
 	setmetatable(self, nil)
 end
@@ -308,7 +304,7 @@ function ObjectPool:SetMaxSize(newMaxSize: number): ()
 end
 
 function ObjectPool:Prewarm(count: number): ()
-	count = mathClamp(count, 0, self.maxSize - self.activeCount - self.availableCount)
+	count = math.clamp(count, 0, self.maxSize - self.activeCount - self.availableCount)
 	
 	for i = 1, count do
 		local obj = self.template:Clone()
@@ -320,7 +316,7 @@ end
 
 function ObjectPool:PrewarmAsync(count: number): ()
 	task.spawn(function()
-		count = mathClamp(count, 0, self.maxSize - self.activeCount - self.availableCount)
+		count = math.clamp(count, 0, self.maxSize - self.activeCount - self.availableCount)
 		
 		for i = 1, count do
 			local obj = self.template:Clone()
